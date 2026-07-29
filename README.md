@@ -340,6 +340,8 @@ Aplikacja komunikuje się ze sterownikiem aktywnie, protokołem **ecoNET** używ
 - Obsługiwane są zapytania o parametry (`FRAME_GET_PARAMS`), zapis parametrów (`FRAME_SET_PARAM`), parametry mieszaczy i termostatów, harmonogramy tygodniowe (`FRAME_GET_SCHEDULES` / `FRAME_SET_SCHEDULE`), identyfikator urządzenia (`FRAME_GET_UID`) oraz alarmy
 - Aplikacja odpowiada na ramkę `FRAME_DEVICE_AVAILABLE` (0xB0), zgodnie z wymaganiami protokołu
 
+> Dekodowanie ramek ecoNET (typy ramek, struktura payloadu, obliczanie CRC) opiera się na wiedzy zgromadzonej w projekcie [homeassistant-plum-ecomax](https://github.com/denpamusic/homeassistant-plum-ecomax) — integracji Home Assistant dla sterowników Plum ecoMAX autorstwa [denpamusic](https://github.com/denpamusic). Dzięki temu repozytorium możliwe było odtworzenie protokołu bez oficjalnej dokumentacji producenta.
+
 ## Rozwiązywanie problemów
 
 ### Aplikacja nie łączy się z EW11A
