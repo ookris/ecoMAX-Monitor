@@ -6,6 +6,10 @@ Aplikacja webowa do monitorowania i sterowania sterownikiem kotła **ecoMAX** (P
 [ecoMAX] --RS485/G2--> [Elfin EW11A] --TCP/WiFi--> [ecoMAX Monitor (Flask + SocketIO)]
 ```
 
+![Dashboard ecoMAX Monitor](img/panel_glowny_1.png)
+
+Więcej zrzutów ekranu (analiza, parametry, sterowanie, alerty, logi, ustawienia) znajdziesz w [galerii screenshotów](screens.md).
+
 ## Spis treści
 
 - [Funkcje](#funkcje)
@@ -74,6 +78,8 @@ mkdir -p data
 Baza SQLite (`data/measurements.db`) oraz logi (`data/logs/`) zostaną utworzone automatycznie przy pierwszym uruchomieniu.
 
 ## Konfiguracja EW11A
+
+![Moduł Elfin EW11 / EW10](img/Elfin-EW1X.png)
 
 Moduł EW11A musi być skonfigurowany w trybie **TCP Server**:
 
