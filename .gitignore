@@ -2,3 +2,6 @@
 /__pycache__
 /econet/__pycache__
 /web/__pycache__
+
+/data/*.db
+/data/logs/
