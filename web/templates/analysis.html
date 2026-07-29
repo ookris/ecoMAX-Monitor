@@ -1,0 +1,200 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ecoMAX Monitor - Analiza</title>
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
+    <script>
+        (function () { if (localStorage.getItem('theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); })();
+    </script>
+    <script src="https://code.iconify.design/iconify-icon/1.0.7/iconify-icon.min.js"></script>
+</head>
+<body>
+    <header>
+        <h1><a href="/" class="brand-link"><img src="/static/img/logo.svg?v={{ asset_version }}" alt="" class="brand-logo">ecoMAX Monitor - Analiza</a></h1>
+        <div class="header-actions">
+            <button id="btn-theme" class="btn-theme" onclick="toggleTheme()" title="Przełącz na tryb ciemny"><iconify-icon icon="mdi:weather-night"></iconify-icon></button>
+            {% set active_page = 'analysis' %}
+            {% include '_menu_dropdown.html' %}
+        </div>
+    </header>
+
+    <main class="dashboard">
+        <section class="settings-section">
+            <div class="analysis-range-controls" style="margin-bottom: 14px;">
+                <label for="ana-range-preset" class="settings-hint">Zakres analizy:</label>
+                <select id="ana-range-preset" class="alerts-filter-select"></select>
+                <div id="ana-range-custom" style="display:none; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <input id="ana-range-start" type="datetime-local" class="alerts-filter-select" aria-label="Początek zakresu analizy" />
+                    <span class="settings-hint">do</span>
+                    <input id="ana-range-end" type="datetime-local" class="alerts-filter-select" aria-label="Koniec zakresu analizy" />
+                    <button id="ana-range-apply" class="btn-secondary" type="button">Zastosuj</button>
+                </div>
+            </div>
+            <h2>Podsumowanie <span id="ana-range-summary-label">(zakres)</span></h2>
+            <div class="stats-grid" style="margin-top: 16px;">
+                <div class="stat-item">
+                    <span class="stat-label">Średnia moc</span>
+                    <span class="stat-value" id="ana-power-avg">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Paliwo (zakres)</span>
+                    <span class="stat-value" id="ana-fuel-24h">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Koszt (dzień)</span>
+                    <span class="stat-value" id="ana-cost-day">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Koszt (miesiąc)</span>
+                    <span class="stat-value" id="ana-cost-month">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Praca (udział)</span>
+                    <span class="stat-value" id="ana-work-share">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Rozpalenia</span>
+                    <span class="stat-value" id="ana-ignitions-24h">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Rozpalanie → Praca (śr.)</span>
+                    <span class="stat-value" id="ana-ignition-to-work">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">ΔT CO–powrót (śr.)</span>
+                    <span class="stat-value" id="ana-eff-avg">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Niska ΔT &lt; 8°C (czas)</span>
+                    <span class="stat-value" id="ana-eff-low-time">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">ΔT CO–powrót (min/max)</span>
+                    <span class="stat-value" id="ana-delta-minmax">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Dogrzewania CWU</span>
+                    <span class="stat-value" id="ana-cwu-cycles">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Czas dogrzewania CWU</span>
+                    <span class="stat-value" id="ana-cwu-heat-time">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Wpływ CWU na temp. kotła</span>
+                    <span class="stat-value" id="ana-cwu-impact">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Jałowa praca (czas)</span>
+                    <span class="stat-value" id="ana-idle-work-time">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Dziury telemetrii</span>
+                    <span class="stat-value" id="ana-telemetry-gaps">--</span>
+                </div>
+                <div class="stat-item">
+                    <span class="stat-label">Odrzucone ramki (licznik)</span>
+                    <span class="stat-value" id="ana-rejected-frames">--</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="chart-section">
+            <div class="chart-header">
+                <h2>Udział trybów pracy <span id="ana-range-modes-label">(zakres)</span></h2>
+            </div>
+            <div class="chart-canvas-wrap chart-canvas-wrap-doughnut analysis-mode-share-wrap">
+                <canvas id="mode-share-chart"></canvas>
+            </div>
+            <div id="mode-share-empty" class="chart-empty-note"></div>
+        </section>
+
+        <section class="chart-section">
+            <div class="chart-header">
+                <h2>Trend paliwa i kosztu (7 dni)</h2>
+            </div>
+            <div class="chart-canvas-wrap chart-canvas-wrap-line">
+                <canvas id="fuel-cost-chart"></canvas>
+            </div>
+            <div id="fuel-cost-empty" class="chart-empty-note"></div>
+        </section>
+
+        <section class="chart-section">
+            <div class="chart-header">
+                <h2>Trend ΔT CO–powrót <span id="ana-range-delta-label">(zakres)</span></h2>
+            </div>
+            <div class="chart-canvas-wrap chart-canvas-wrap-line">
+                <canvas id="delta-trend-chart"></canvas>
+            </div>
+            <div id="delta-trend-empty" class="chart-empty-note"></div>
+        </section>
+
+        <section class="chart-section">
+            <div class="chart-header">
+                <h2>Czas w trybach <span id="ana-range-compare-label">(zakres)</span> vs 7 dni</h2>
+            </div>
+            <div class="chart-canvas-wrap chart-canvas-wrap-line">
+                <canvas id="mode-share-compare-chart"></canvas>
+            </div>
+            <div id="mode-share-compare-empty" class="chart-empty-note"></div>
+        </section>
+
+        <section class="report-section" id="anomalies-section">
+            <h2>Anomalie dnia <span id="ana-range-anomalies-label">(zakres)</span></h2>
+            <table class="report-table" id="anomalies-table">
+                <thead>
+                    <tr><th>Kategoria</th><th>Poziom</th><th>Szczegóły</th></tr>
+                </thead>
+                <tbody id="anomalies-body"></tbody>
+            </table>
+        </section>
+
+        <section class="report-section" id="dayparts-section">
+            <h2>Zużycie i koszt wg pory dnia <span id="ana-range-dayparts-label">(zakres)</span></h2>
+            <table class="report-table" id="dayparts-table">
+                <thead>
+                    <tr><th>Pora dnia</th><th>Paliwo (kg)</th><th>Koszt (PLN)</th><th>Udział paliwa</th></tr>
+                </thead>
+                <tbody id="dayparts-body"></tbody>
+            </table>
+        </section>
+
+        <section class="report-section" id="weekly-compare-section">
+            <h2>Trendy tygodniowe (dzień do dnia)</h2>
+            <table class="report-table" id="weekly-compare-table">
+                <thead>
+                    <tr><th>Dzień</th><th>Paliwo (kg)</th><th>Poprz. tydzień (kg)</th><th>Zmiana</th></tr>
+                </thead>
+                <tbody id="weekly-compare-body"></tbody>
+            </table>
+        </section>
+
+        <section class="report-section" id="report-section">
+            <h2>Raport zużycia paliwa <span id="ana-report-days-label">(7 dni)</span></h2>
+            <table class="report-table" id="report-table">
+                <thead>
+                    <tr><th>Dzień</th><th>Paliwo (kg)</th><th>Koszt (PLN)</th><th>Pomiary</th></tr>
+                </thead>
+                <tbody id="report-body"></tbody>
+            </table>
+            <div style="margin-top:12px; text-align:right;">
+                <a id="export-link" href="/api/export?hours=168" class="btn-export" download>
+                    <iconify-icon icon="mdi:download"></iconify-icon> <span id="ana-export-label">Pobierz CSV (7 dni)</span>
+                </a>
+            </div>
+        </section>
+    </main>
+
+    <footer>
+        <span>ecoMAX Monitor | <a href="/">Dashboard</a> | <a href="/settings">Ustawienia</a></span>
+    </footer>
+
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+    <script src="/static/js/mode_colors.js?v={{ asset_version }}"></script>
+    <script src="/static/js/nav.js?v={{ asset_version }}"></script>
+    <script src="/static/js/theme.js?v={{ asset_version }}"></script>
+    <script src="/static/js/analysis.js?v={{ asset_version }}"></script>
+</body>
+</html>

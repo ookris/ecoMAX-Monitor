@@ -1,0 +1,21 @@
+<div class="nav-dropdown" data-nav-dropdown>
+    <button class="btn-nav nav-menu-toggle" type="button" data-nav-toggle
+            aria-expanded="false" aria-haspopup="true" aria-controls="nav-menu-panel">
+        <iconify-icon icon="mdi:menu"></iconify-icon> Menu
+    </button>
+    <div class="nav-menu" data-nav-menu id="nav-menu-panel">
+        <nav aria-label="Nawigacja aplikacji">
+            <div class="nav-menu-list">
+                <a href="/" class="nav-menu-link{% if active_page == 'dashboard' %} active{% endif %}">Dashboard</a>
+                <a href="/analysis" class="nav-menu-link{% if active_page == 'analysis' %} active{% endif %}">Analiza</a>
+                <a href="/parameters" class="nav-menu-link{% if active_page == 'parameters' %} active{% endif %}">Parametry</a>
+                <a href="/boiler-control" class="nav-menu-link{% if active_page == 'boiler-control' %} active{% endif %}">Sterowanie</a>
+                <a href="/alerts" class="nav-menu-link{% if active_page == 'alerts' %} active{% endif %}">Alerty</a>
+                <a href="/logs" class="nav-menu-link{% if active_page == 'logs' %} active{% endif %}">Logi</a>
+            </div>
+            <div class="nav-menu-footer">
+                <a href="/settings" class="nav-menu-link nav-menu-settings{% if active_page == 'settings' %} active{% endif %}">Ustawienia</a>
+            </div>
+        </nav>
+    </div>
+</div>

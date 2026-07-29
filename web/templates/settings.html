@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ecoMAX Monitor - Ustawienia</title>
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
+    <script>
+        // Zastosuj motyw przed renderowaniem (zapobiega miganiu)
+        (function () { if (localStorage.getItem('theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); })();
+    </script>
+    <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+</head>
+<body>
+    <header>
+        <h1><a href="/" class="brand-link"><img src="/static/img/logo.svg?v={{ asset_version }}" alt="" class="brand-logo">ecoMAX Monitor</a></h1>
+        <div class="header-actions">
+            <button id="btn-theme" class="btn-theme" onclick="toggleTheme()" title="Przełącz na tryb ciemny"><iconify-icon icon="mdi:weather-night"></iconify-icon></button>
+            {% set active_page = 'settings' %}
+            {% include '_menu_dropdown.html' %}
+        </div>
+    </header>
+
+    <main>
+        <div id="settings-msg" class="settings-msg" style="display:none"></div>
+
+        <!-- Baner problemu uruchamiania po restarcie -->
+        <div id="startup-banner" class="alert-banner" style="display:none">
+            <div>
+                <span id="startup-banner-text"></span>
+                <div id="startup-banner-help" style="display:none; margin-top:6px; font-weight:400; font-size:0.92rem; line-height:1.4;">
+                    Diagnostyka: <a href="/logs" style="color:inherit; text-decoration:underline;">otwórz logi aplikacji</a><br>
+                    SSH: <code>systemctl status ecomax-monitor.service --no-pager -l</code><br>
+                    SSH: <code>journalctl -u ecomax-monitor.service -n 120 --no-pager -l</code>
+                </div>
+            </div>
+            <button class="alert-dismiss" onclick="dismissStartupBanner()"><iconify-icon icon="mdi:close"></iconify-icon></button>
+        </div>
+
+        <!-- Połączenie -->
+        <section class="settings-section">
+            <h2>Połączenie z EW11A</h2>
+            <p class="settings-note">Zmiany adresu IP/portu wchodzą w życie po restarcie aplikacji.</p>
+            <div class="settings-grid">
+                <div class="settings-field">
+                    <label for="ew11a_host">Adres IP modułu EW11A</label>
+                    <input type="text" id="ew11a_host" name="ew11a_host" placeholder="192.168.1.100">
+                </div>
+                <div class="settings-field">
+                    <label for="ew11a_port">Port TCP</label>
+                    <input type="number" id="ew11a_port" name="ew11a_port" min="1" max="65535" placeholder="8899">
+                </div>
+                <div class="settings-field">
+                    <label for="read_interval">Częstotliwość odczytu danych (sekundy)</label>
+                    <input type="number" id="read_interval" name="read_interval" min="1" max="3600" step="1" placeholder="5">
+                    <span class="settings-hint">Co ile sekund aktualizować dane z czujnika w aplikacji (wymaga restartu)</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Odczyt i zapis -->
+        <section class="settings-section">
+            <h2>Odczyt i zapis danych</h2>
+            <p class="settings-note">Zmiany interwałów zaczynają obowiązywać po restarcie aplikacji.</p>
+            <div class="settings-grid">
+                <div class="settings-field">
+                    <label for="db_save_interval">Częstotliwość zapisu do bazy (sekundy)</label>
+                    <input type="number" id="db_save_interval" name="db_save_interval" min="1" max="3600" step="1" placeholder="60">
+                    <span class="settings-hint">Co ile sekund zapisywać próbkę do bazy danych</span>
+                </div>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <h2>Czas systemowy i NTP</h2>
+            <p class="settings-note">Zmiana czasu systemowego wymaga uprawnień administratora na serwerze.</p>
+            <div class="settings-grid">
+                <div class="settings-field">
+                    <label>Aktualny czas serwera</label>
+                    <div id="server-time-now">--</div>
+                    <span class="settings-hint">Strefa: <span id="server-timezone">--</span></span>
+                </div>
+                <div class="settings-field">
+                    <label for="time_zone">Strefa czasowa</label>
+                    <select id="time_zone" name="time_zone">
+                        <optgroup label="Europa">
+                            <option value="Europe/Warsaw">Europe/Warsaw (PL)</option>
+                            <option value="Europe/Berlin">Europe/Berlin</option>
+                            <option value="Europe/Prague">Europe/Prague</option>
+                            <option value="Europe/Vienna">Europe/Vienna</option>
+                            <option value="Europe/Paris">Europe/Paris</option>
+                            <option value="Europe/London">Europe/London</option>
+                            <option value="Europe/Helsinki">Europe/Helsinki</option>
+                            <option value="Europe/Kiev">Europe/Kiev</option>
+                            <option value="Europe/Vilnius">Europe/Vilnius</option>
+                            <option value="Europe/Riga">Europe/Riga</option>
+                            <option value="Europe/Tallinn">Europe/Tallinn</option>
+                        </optgroup>
+                        <optgroup label="UTC">
+                            <option value="UTC">UTC</option>
+                            <option value="Etc/UTC">Etc/UTC</option>
+                        </optgroup>
+                        <optgroup label="Ameryka">
+                            <option value="America/New_York">America/New_York</option>
+                            <option value="America/Chicago">America/Chicago</option>
+                            <option value="America/Denver">America/Denver</option>
+                            <option value="America/Los_Angeles">America/Los_Angeles</option>
+                            <option value="America/Toronto">America/Toronto</option>
+                        </optgroup>
+                        <optgroup label="Azja i Australia">
+                            <option value="Asia/Tokyo">Asia/Tokyo</option>
+                            <option value="Asia/Seoul">Asia/Seoul</option>
+                            <option value="Asia/Shanghai">Asia/Shanghai</option>
+                            <option value="Asia/Dubai">Asia/Dubai</option>
+                            <option value="Australia/Sydney">Australia/Sydney</option>
+                        </optgroup>
+                    </select>
+                    <span class="settings-hint">Wybierz strefę z listy.</span>
+                </div>
+                <div class="settings-field">
+                    <label for="server_date">Ustaw datę serwera</label>
+                    <input type="date" id="server_date" name="server_date">
+                    <span class="settings-hint">Zmieniana jest data; bieżąca godzina serwera pozostaje bez zmian.</span>
+                </div>
+                <div class="settings-field">
+                    <label for="time_ntp_server">Serwer NTP</label>
+                    <input type="text" id="time_ntp_server" name="time_ntp_server" placeholder="pool.ntp.org">
+                    <span class="settings-hint">Np. pool.ntp.org lub lokalny serwer NTP.</span>
+                </div>
+                <div class="settings-field">
+                    <label>
+                        <input type="checkbox" id="time_ntp_sync" name="time_ntp_sync">
+                        Po zmianie wykonaj jednorazową synchronizację czasu przez NTP
+                    </label>
+                </div>
+            </div>
+            <div style="margin-top: 1rem;">
+                <button class="btn-secondary" onclick="applyTimeSettings()" title="Zastosuj strefę czasową, datę i opcjonalnie synchronizację NTP">
+                    Zastosuj ustawienia czasu
+                </button>
+            </div>
+        </section>
+
+        <!-- Pogoda -->
+        <section class="settings-section">
+            <h2>Pogoda</h2>
+            <p class="settings-note">Podaj współrzędne miejsca instalacji pieca (lat/lon).</p>
+            <div class="settings-grid">
+                <div class="settings-field">
+                    <label for="weather_lat">Szerokość geograficzna (lat)</label>
+                    <input type="text" id="weather_lat" name="weather_lat" inputmode="decimal" placeholder="52.22977">
+                    <span class="settings-hint">Zakres: od -90 do 90</span>
+                </div>
+                <div class="settings-field">
+                    <label for="weather_lon">Długość geograficzna (lon)</label>
+                    <input type="text" id="weather_lon" name="weather_lon" inputmode="decimal" placeholder="21.01178">
+                    <span class="settings-hint">Zakres: od -180 do 180</span>
+                </div>
+                <div class="settings-field">
+                    <span class="settings-hint">
+                        API pogodowe: <a href="https://open-meteo.com/" target="_blank" rel="noopener noreferrer">Open-Meteo</a> (bez klucza) + reverse geocoding: <a href="https://nominatim.org/" target="_blank" rel="noopener noreferrer">Nominatim (OpenStreetMap)</a>.<br>
+                        Współrzędne sprawdzisz np. tutaj: <a href="https://www.openstreetmap.org/" target="_blank" rel="noopener noreferrer">OpenStreetMap</a>.
+                    </span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Widoczne kafelki danych -->
+        <section class="settings-section">
+            <h2>Widoczne kafelki danych na stronie głównej</h2>
+            <p class="settings-note">Wybierz, które kafelki danych pokazywać na dashboardzie.</p>
+            <div class="sensor-list" id="sensor-list">
+                {% for sensor in sensor_definitions %}
+                <label class="sensor-item"><input type="checkbox" class="sensor-checkbox" value="{{ sensor.key }}"> {{ sensor.label }}</label>
+                {% endfor %}
+            </div>
+        </section>
+
+        <!-- Progi alarmowe -->
+        <section class="settings-section">
+            <h2>Progi alarmowe</h2>
+            <div class="settings-grid">
+                <div class="settings-field">
+                    <label for="alert_temp_flue_max">Maks. temperatura spalin (°C)</label>
+                    <input type="number" id="alert_temp_flue_max" name="alert_temp_flue_max" min="50" max="500" step="1">
+                    <span class="settings-hint">Alarm gdy temp. spalin przekroczy ten próg</span>
+                </div>
+                <div class="settings-field">
+                    <label for="alert_temp_co_min">Min. temperatura CO (°C)</label>
+                    <input type="number" id="alert_temp_co_min" name="alert_temp_co_min" min="0" max="100" step="1">
+                    <span class="settings-hint">Alarm gdy temp. zasilania spadnie poniżej</span>
+                </div>
+                <div class="settings-field">
+                    <label for="alert_fuel_level_min">Min. poziom paliwa (%)</label>
+                    <input type="number" id="alert_fuel_level_min" name="alert_fuel_level_min" min="0" max="100" step="1">
+                    <span class="settings-hint">Alarm gdy poziom paliwa spadnie poniżej</span>
+                </div>
+                <div class="settings-field">
+                    <label for="alert_no_connection_min">Brak połączenia (minuty)</label>
+                    <input type="number" id="alert_no_connection_min" name="alert_no_connection_min" min="1" max="60" step="1">
+                    <span class="settings-hint">Alarm gdy EW11A niedostępny przez X minut</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Retencja alertów -->
+        <section class="settings-section">
+            <h2>Retencja alertów</h2>
+            <div class="settings-grid">
+                <div class="settings-field">
+                    <label for="alert_retention_mode">Tryb retencji alertów</label>
+                    <select id="alert_retention_mode" name="alert_retention_mode">
+                        <option value="days">Przez liczbę dni</option>
+                        <option value="count">Przez liczbę alertów</option>
+                    </select>
+                    <span class="settings-hint">Wybierz, czy historia alertów ma być ograniczana czasem czy ilością wpisów.</span>
+                </div>
+                <div class="settings-field">
+                    <label for="alert_retention_days">Przechowywanie alertów (dni)</label>
+                    <input type="number" id="alert_retention_days" name="alert_retention_days" min="1" max="3650" step="1">
+                    <span class="settings-hint">Używane gdy tryb retencji = dni</span>
+                </div>
+                <div class="settings-field">
+                    <label for="alert_retention_count">Maksymalna liczba alertów</label>
+                    <input type="number" id="alert_retention_count" name="alert_retention_count" min="1" max="50000" step="1">
+                    <span class="settings-hint">Używane gdy tryb retencji = ilość alertów</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Ekonomia -->
+        <section class="settings-section">
+            <h2>Koszty ogrzewania</h2>
+            <div class="settings-grid">
+                <div class="settings-field">
+                    <label for="fuel_price_per_ton">Cena paliwa (PLN / tona)</label>
+                    <input type="number" id="fuel_price_per_ton" name="fuel_price_per_ton" min="0" max="10000" step="10">
+                    <span class="settings-hint">Używane do obliczania kosztów zużycia</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Retencja danych -->
+        <section class="settings-section">
+            <h2>Historia danych</h2>
+            <div class="settings-grid">
+                <div class="settings-field">
+                    <label for="db_retention_days">Przechowywanie historii (dni)</label>
+                    <input type="number" id="db_retention_days" name="db_retention_days" min="1" max="365" step="1">
+                    <span class="settings-hint">Starsze pomiary są automatycznie usuwane</span>
+                </div>
+            </div>
+        </section>
+
+        <!-- Logowanie -->
+        <section class="settings-section">
+            <h2>Logowanie aplikacji</h2>
+            <div class="settings-grid">
+                <div class="settings-field">
+                    <label>
+                        <input type="checkbox" id="log_enabled" name="log_enabled">
+                        Włącz logowanie do pliku
+                    </label>
+                    <span class="settings-hint">Aplikacja będzie zapisywać logi do pliku data/logs/ecomax-monitor.log. Zmiana ustawienia zacznie obowiązywać po ponownym uruchomieniu aplikacji.</span>
+                </div>
+                <div class="settings-field">
+                    <label for="log_retention_days">Przechowywanie logów (dni)</label>
+                    <input type="number" id="log_retention_days" name="log_retention_days" min="1" max="365" step="1">
+                    <span class="settings-hint">Starsze logi są automatycznie usuwane</span>
+                </div>
+            </div>
+            <div style="margin-top: 1rem;">
+                <button class="btn-secondary" onclick="downloadLogs()" title="Pobierz plik logu">Pobierz logi</button>
+                <button class="btn-secondary" onclick="viewLogs()" title="Wyświetl ostatnie wpisy logu">Wyświetl ostatnie wpisy</button>
+            </div>
+        </section>
+
+        <section class="settings-section">
+            <h2>Akcje serwisowe</h2>
+            <p class="settings-note">Używaj ostrożnie. Operacje usuwania danych są nieodwracalne.</p>
+            <div style="margin-top: 1rem;">
+                <button class="btn-secondary" onclick="restartAppFromSettings()" title="Zrestartuj aplikację ecoMAX Monitor">
+                    Restartuj aplikację
+                </button>
+                <button class="btn-secondary" onclick="resetRuntimeData()" title="Wyczyść pomiary i alerty, zachowaj konfigurację">
+                    Wyczyść statystyki (zachowaj ustawienia)
+                </button>
+                <button class="btn-secondary btn-danger" onclick="resetAllDataAndConfig()" title="Wyczyść pomiary, alerty i konfigurację">
+                    Pełny reset bazy i konfiguracji
+                </button>
+            </div>
+        </section>
+
+        <div class="settings-actions">
+            <button class="btn-save" onclick="saveSettings()">Zapisz ustawienia</button>
+        </div>
+    </main>
+
+    <footer>
+        <span>ecoMAX Monitor | <a href="/">Dashboard</a> | <a href="/parameters">Parametry</a></span>
+    </footer>
+
+    <script src="/static/js/settings.js?v={{ asset_version }}"></script>
+    <script src="/static/js/nav.js?v={{ asset_version }}"></script>
+    <script src="/static/js/theme.js?v={{ asset_version }}"></script>
+</body>
+</html>
