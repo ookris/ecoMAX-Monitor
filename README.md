@@ -2,6 +2,8 @@
 
 Aplikacja webowa do monitorowania i sterowania sterownikiem kotła **ecoMAX** (Plum/ecoNET) przez moduł **Elfin EW11A** (konwerter RS485 → TCP/WiFi). Odczytuje dane w czasie rzeczywistym, zapisuje historię do bazy SQLite, pozwala zmieniać ustawienia kotła i udostępnia dashboard oraz REST API.
 
+To w pełni samodzielna aplikacja — nie wymaga instalowania ani konfigurowania żadnych dodatkowych systemów (np. Home Assistant). Integracja z Home Assistant i Prometheusem (opisana w sekcji [Integracje](#integracje)) jest opcjonalna i nie jest potrzebna do korzystania z dashboardu, sterowania kotłem czy alertów.
+
 ```
 [ecoMAX] --RS485/G2--> [Elfin EW11A] --TCP/WiFi--> [ecoMAX Monitor (Flask + SocketIO)]
 ```
@@ -41,7 +43,7 @@ Więcej zrzutów ekranu (analiza, parametry, sterowanie, alerty, logi, ustawieni
 ## Wymagania
 
 - **Python 3.10+**
-- Moduł **Elfin EW11A** skonfigurowany jako serwer TCP (domyślnie port 8899)
+- Moduł **[Elfin EW11A](https://pl.aliexpress.com/w/wholesale-elfin-ew11a-wifi.html)** skonfigurowany jako serwer TCP (domyślnie port 8899) — nie testowałem z innymi modułami tego typu, ale raczej nie powinno być problemów.
 - Sterownik **ecoMAX** podłączony do EW11A przez RS485 (port G2, wtyczka RJ11)
 - Komputer/serwer/Raspberry Pi/VM w tej samej sieci co EW11A
 
@@ -109,7 +111,13 @@ Jeśli widzisz dane binarne — połączenie działa.
 
 ## Pierwsze uruchomienie i konfiguracja aplikacji
 
-Aplikacja **nie ma pliku `config.py`** — cała konfiguracja jest przechowywana w bazie SQLite i edytowana z poziomu strony **Ustawienia** (`/settings`) w przeglądarce. Dopóki adres EW11A nie zostanie zapisany, na dashboardzie widoczny jest baner z linkiem do konfiguracji.
+Cała konfiguracja aplikacji jest przechowywana w bazie SQLite i edytowana z poziomu przeglądarki — nie trzeba ręcznie edytować żadnych plików.
+
+Aby dostać się do panelu ustawień:
+
+1. Uruchom aplikację (`python run.py`) i otwórz w przeglądarce `http://<IP_serwera>:5050`.
+2. Dopóki adres EW11A nie zostanie skonfigurowany, na dashboardzie widoczny jest baner **„Aplikacja nie jest skonfigurowana”** z linkiem prosto do ustawień.
+3. W dowolnym momencie możesz też otworzyć ustawienia z górnego menu (**Menu → Ustawienia**) albo bezpośrednio pod adresem `http://<IP_serwera>:5050/settings`.
 
 Najważniejsze ustawienia (z domyślnymi wartościami):
 
@@ -145,7 +153,32 @@ Nadpisują wartości z bazy/domyślne i dodają dodatkowe zabezpieczenia dostęp
 | `BOILER_SERVICE_ACCESS_TOKEN`   | Token odblokowujący profil serwisowy parametrów kotła        |
 | `ASSET_VERSION`                 | Wersja plików statycznych (cache-busting)                    |
 
-Bez skonfigurowanych tokenów dostęp do operacji wrażliwych (logi, czas, reset, sterowanie kotłem) jest ograniczony do sieci lokalnej (loopback/private/link-local).
+Aplikacja **nie wczytuje pliku `.env`** — to zwykłe zmienne środowiskowe procesu (`os.environ`), więc trzeba je ustawić tam, gdzie uruchamiany jest `run.py`:
+
+**Uruchomienie ręczne (terminal):**
+
+```bash
+export BOILER_CONTROL_ACCESS_TOKEN="wygenerowany-token"
+export CORS_ALLOWED_ORIGINS="http://192.168.1.10:5050"
+python run.py
+```
+
+albo jednorazowo, tylko dla danego uruchomienia:
+
+```bash
+BOILER_CONTROL_ACCESS_TOKEN="wygenerowany-token" python run.py
+```
+
+**Uruchomienie przez systemd** (patrz [Autostart](#autostart-systemd)) — dodaj wpisy `Environment=` w pliku `ecomax-monitor.service`, każdą zmienną w osobnej linii, i zrestartuj usługę (`daemon-reload` + `restart`):
+
+```ini
+[Service]
+...
+Environment="BOILER_CONTROL_ACCESS_TOKEN=wygenerowany-token"
+Environment="CORS_ALLOWED_ORIGINS=http://192.168.1.10:5050"
+```
+
+Bez skonfigurowanych tokenów dostęp do operacji wrażliwych (logi, czas, reset, sterowanie kotłem) jest ograniczony do sieci lokalnej (loopback/private/link-local) lub lokalny VPN. 
 
 ## Uruchomienie
 
