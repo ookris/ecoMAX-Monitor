@@ -41,7 +41,7 @@ Więcej zrzutów ekranu (analiza, parametry, sterowanie, alerty, logi, ustawieni
 ## Wymagania
 
 - **Python 3.10+**
-- Moduł **Elfin EW11A** skonfigurowany jako serwer TCP (domyślnie port 8899)
+- Moduł **(Elfin EW11A)[https://pl.aliexpress.com/w/wholesale-elfin-ew11a-wifi.html]** skonfigurowany jako serwer TCP (domyślnie port 8899), nie testowałem z innymi modułami ale raczej nie powinno być problemów. 
 - Sterownik **ecoMAX** podłączony do EW11A przez RS485 (port G2, wtyczka RJ11)
 - Komputer/serwer/Raspberry Pi/VM w tej samej sieci co EW11A
 
