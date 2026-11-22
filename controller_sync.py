@@ -52,6 +52,9 @@ _PARAMS_FRAME_TYPES = frozenset({protocol.FRAME_GET_PARAMS, protocol.FRAME_GET_S
 # Okno, w ktorym zmiana wykryta w sterowniku jest uznawana za skutek zapisu z aplikacji.
 _OWN_WRITE_WINDOW_SEC = 180
 
+# Ponowienie zadania, ktorego termin minal przy braku polaczenia z EW11A.
+_RETRY_WHEN_DISCONNECTED_SEC = 15.0
+
 # Opoznienie zadania po zmianie wersji ramki (kolejne zmiany przesuwaja termin).
 DEFAULT_DEBOUNCE_SEC = 10.0
 
@@ -93,6 +96,7 @@ class ControllerSync:
         self._running = False
         self._thread: Optional[threading.Thread] = None
         self._param_snapshot: Optional[dict[int, int]] = None
+        self._param_snapshot_ts: Optional[float] = None
 
     # ------------------------------------------------------------ cykl zycia
 
@@ -181,6 +185,8 @@ class ControllerSync:
         ready = self._take_due_tasks(now)
         for task in ready:
             if not getattr(self._connection, 'connected', False):
+                # Brak polaczenia - ponow zadanie pozniej zamiast je gubic.
+                self.request(task, delay=_RETRY_WHEN_DISCONNECTED_SEC)
                 continue
             with self._due_lock:
                 self._current_task = task
@@ -230,12 +236,15 @@ class ControllerSync:
             for index, entry in parameters.items()
             if entry.get('available') and entry.get('value') is not None
         }
+        now = time.time()
         previous = self._param_snapshot
+        previous_ts = self._param_snapshot_ts
         self._param_snapshot = values
+        self._param_snapshot_ts = now
         if previous is None:
             return
-
-        now = time.time()
+        # Zapisy aplikacji od chwili poprzedniego odczytu (min. _OWN_WRITE_WINDOW_SEC wstecz).
+        own_writes_since = min(previous_ts or now, now - _OWN_WRITE_WINDOW_SEC)
         for index, new_value in sorted(values.items()):
             old_value = previous.get(index)
             if old_value is None or old_value == new_value:
@@ -244,7 +253,7 @@ class ControllerSync:
                 target_type='ecomax',
                 param_index=index,
                 new_value=str(new_value),
-                since=now - _OWN_WRITE_WINDOW_SEC,
+                since=own_writes_since,
             ):
                 continue
             key = _CATALOG_KEYS.get(index) or parameter_key(index)
@@ -281,6 +290,27 @@ class ControllerSync:
         stats = {'new': 0, 'updated': 0, 'unchanged': 0, 'invalid': 0, 'total': 0}
         new_alarms: list[dict] = []
 
+        try:
+            self._read_alarm_pages(initial_import, oldest_ongoing, future_limit, stats, new_alarms)
+        finally:
+            # Alerty dla zapisanych nowych alarmow takze wtedy, gdy kolejna strona sie nie wczytala
+            # (w nastepnej synchronizacji te alarmy beda juz 'unchanged').
+            if not initial_import and self._on_new_alarm:
+                for alarm in sorted(new_alarms, key=lambda a: a['start']):
+                    try:
+                        self._on_new_alarm(alarm)
+                    except Exception as e:
+                        logger.error("Blad zglaszania alarmu sterownika: %s", e, exc_info=True)
+
+        if initial_import:
+            self._db.set_config(CONFIG_ALARMS_IMPORTED, '1')
+
+        if stats['new'] or stats['updated']:
+            logger.info("Alarmy sterownika: %d nowych, %d zaktualizowanych (lacznie w sterowniku: %d)",
+                        stats['new'], stats['updated'], stats['total'])
+        return stats
+
+    def _read_alarm_pages(self, initial_import, oldest_ongoing, future_limit, stats, new_alarms) -> None:
         start = 0
         for _ in range(_MAX_ALARM_PAGES):
             page = self._connection.request_alerts(start=start, count=alarms.ALERTS_PAGE_SIZE)
@@ -320,21 +350,6 @@ class ControllerSync:
                 )
                 if not needs_ongoing_update:
                     break
-
-        if initial_import:
-            self._db.set_config(CONFIG_ALARMS_IMPORTED, '1')
-
-        if stats['new'] or stats['updated']:
-            logger.info("Alarmy sterownika: %d nowych, %d zaktualizowanych (lacznie w sterowniku: %d)",
-                        stats['new'], stats['updated'], stats['total'])
-
-        if not initial_import and self._on_new_alarm:
-            for alarm in sorted(new_alarms, key=lambda a: a['start']):
-                try:
-                    self._on_new_alarm(alarm)
-                except Exception as e:
-                    logger.error("Blad zglaszania alarmu sterownika: %s", e, exc_info=True)
-        return stats
 
     # ------------------------------------------------- dane regulatora
 

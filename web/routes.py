@@ -1580,6 +1580,9 @@ def get_service_parameters():
         params = _execute_blocking(_connection.request_service_parameters, timeout=3.0)
     except TimeoutError as exc:
         return jsonify({'status': 'error', 'message': str(exc)}), 504
+    except Exception as exc:
+        logging.getLogger(__name__).warning('Blad odczytu parametrow serwisowych: %s', exc)
+        return jsonify({'status': 'error', 'message': 'Nie udało się odczytać parametrów serwisowych'}), 503
     rows = [
         {'index': index, **entry}
         for index, entry in sorted(params.items())
@@ -2941,9 +2944,10 @@ def reset_runtime_data():
         return jsonify({'status': 'error', 'message': 'Brak uprawnień do resetu danych'}), 403
 
     try:
-        details = _database.reset_runtime_data()
+        # Najpierw tracker (czeka na trwajacy zapis), potem baza - stare przyrosty nie wroca.
         if _operation_tracker is not None:
             _operation_tracker.reset()
+        details = _database.reset_runtime_data()
         return jsonify({
             'status': 'ok',
             'message': 'Wyczyszczono statystyki (pomiary i alerty). Konfiguracja została zachowana.',
@@ -2965,9 +2969,9 @@ def reset_all_data_and_config():
         return jsonify({'status': 'error', 'message': 'Brak uprawnień do resetu danych'}), 403
 
     try:
-        details = _database.reset_all_data_and_config()
         if _operation_tracker is not None:
             _operation_tracker.reset()
+        details = _database.reset_all_data_and_config()
         with _weather_cache_lock:
             _weather_data_cache.clear()
             _weather_place_cache.clear()

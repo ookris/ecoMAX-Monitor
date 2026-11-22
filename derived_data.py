@@ -73,8 +73,12 @@ def apply_config_overrides(data: Any, cfg: Mapping[str, Any]) -> Any:
 
     load = _as_number(_get(data, 'boiler_power'))
     if _get(data, 'boiler_power_source') == 'calculated':
-        # Ponowne zastosowanie (np. na danych juz skorygowanych) - przelicz od nowa.
+        # Ponowne zastosowanie (np. na danych juz skorygowanych) - przelicz od nowa;
+        # bez mocy kW wyliczonego % nie da sie potwierdzic.
         load = 0.0
+        if _as_number(_get(data, 'boiler_power_kw')) is None:
+            _set(data, 'boiler_power', None)
+            load = None
     power_kw = _as_number(_get(data, 'boiler_power_kw'))
     source = None
     if load is not None and load > 0:

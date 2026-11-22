@@ -623,7 +623,7 @@ class EW11AConnection:
             self._device_info = info
         return info
 
-    def _request_response(self, frame_bytes, response_type, timeout, error_message):
+    def _request_response(self, frame_bytes, response_type, timeout, error_message, match=None):
         """Wyslij zapytanie i zwroc odpowiedz danego typu od sterownika ecoMAX.
 
         Pomija ramki tego typu adresowane do innych urzadzen (np. odpowiedzi dla panelu),
@@ -643,7 +643,8 @@ class EW11AConnection:
                 except queue.Empty as exc:
                     raise TimeoutError(error_message) from exc
                 if (frame.get('source') == protocol.ADDR_ECOMAX
-                        and frame.get('dest') in (protocol.ADDR_BROADCAST, protocol.ADDR_ECONET)):
+                        and frame.get('dest') in (protocol.ADDR_BROADCAST, protocol.ADDR_ECONET)
+                        and (match is None or match(frame))):
                     return frame
 
     def request_mixer_parameters(self, timeout=3.0) -> dict:
@@ -790,20 +791,18 @@ class EW11AConnection:
         if not (0 <= start <= 255 and 1 <= count <= 255):
             raise ValueError('Zakres start/count musi byc w przedziale 0..255')
 
-        with self._transaction_lock:
-            self._drain_response_queue(protocol.FRAME_GET_PARAMS_ANS)
-            frame = protocol.FrameBuilder.request_ecomax_parameters(
+        response_frame = self._request_response(
+            protocol.FrameBuilder.request_ecomax_parameters(
                 dest_addr=protocol.ADDR_ECOMAX,
                 start=start,
                 count=count,
-            )
-            self.send_frame(frame)
-
-            response_queue = self._response_queues[protocol.FRAME_GET_PARAMS_ANS]
-            try:
-                response_frame = response_queue.get(timeout=max(0.1, float(timeout)))
-            except queue.Empty as exc:
-                raise TimeoutError('Brak odpowiedzi na zapytanie parametrów (0xB1)') from exc
+            ),
+            protocol.FRAME_GET_PARAMS_ANS,
+            timeout,
+            'Brak odpowiedzi na zapytanie parametrów (0xB1)',
+            # Odpowiedz na nasze zapytanie zaczyna sie od zadanego indeksu.
+            match=lambda f: len(f.get('payload') or b'') >= 3 and f['payload'][1] == start,
+        )
 
         payload = response_frame.get('payload') or b''
         parsed = self._parse_ecomax_parameters_payload(payload)

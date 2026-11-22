@@ -1261,7 +1261,8 @@ function renderMixerTrendChart(historyRows) {
         mixerTrendChart = null;
     }
     const rows = prepareHistoryRows(historyRows)
-        .filter(row => Number.isFinite(Number(row.mixer1_temp)) || Number.isFinite(Number(row.mixer1_valve)));
+        .filter(row => [row.mixer1_temp, row.mixer1_valve]
+            .some(v => v !== null && v !== undefined && Number.isFinite(Number(v))));
     if (!rows.length) {
         setChartEmptyState('mixer-trend-empty', true, 'Brak danych mieszacza w wybranym zakresie (zapisywane od tej wersji aplikacji).');
         return;
