@@ -11,8 +11,7 @@ uzyj --active 0 (sam nasluch).
 Przyklad:
     python tools/measure_bus.py --host 10.0.0.226 --passive 120 --active 180
 
-Wynik (JSON) na stdout. Opis wynikow pomiaru z 2026-11-22:
-docs/KONCEPCJA-serwis-chmurowy.md, pkt 6a.
+Wynik (JSON) na stdout.
 """
 import argparse
 import collections

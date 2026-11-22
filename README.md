@@ -420,9 +420,8 @@ ecoMAX-Monitor/
 │   └── static/                # CSS, JS, obrazy
 ├── tests/                     # Testy automatyczne (pytest)
 ├── tools/                     # Narzędzia diagnostyczne
-│   ├── measure_bus.py         # Pomiar ruchu z magistrali RS485 przez EW11A
-│   └── mqtt_test/             # Test EW11A w trybie MQTT/TLS (broker, sonda TLS, skrypt)
-├── docs/                      # Plan i raport wdrożenia funkcji, koncepcja serwisu chmurowego
+│   └── measure_bus.py         # Pomiar ruchu z magistrali RS485 przez EW11A
+├── docs/                      # Plan i raport wdrożenia funkcji
 └── data/                      # Baza danych i logi (tworzone automatycznie)
 ```
 
