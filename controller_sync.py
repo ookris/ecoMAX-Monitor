@@ -13,10 +13,13 @@ Zadania:
   i zapis do historii zmian parametrow zmienionych poza aplikacja (panel, ecoNET).
 - 'alarms': odczyt historii alarmow (0x3D/0xBD) do tabeli controller_alarms;
   nowe alarmy (poza pierwszym importem) zglaszane jako alerty aplikacji.
+- 'regdata_schema': odczyt schematu danych regulatora (0x55/0xD5), zapis w bazie
+  i przekazanie do polaczenia (dekodowanie ramek 0x08).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import threading
 import time
@@ -30,6 +33,11 @@ logger = logging.getLogger(__name__)
 
 TASK_PARAMS = 'params'
 TASK_ALARMS = 'alarms'
+TASK_REGDATA_SCHEMA = 'regdata_schema'              # pobierz schemat (wymuszone)
+TASK_REGDATA_SCHEMA_CHECK = 'regdata_schema_check'  # pobierz, gdy brak lub nieaktualny
+
+# Klucz konfiguracji ze schematem danych regulatora (JSON: {"version": n, "schema": [[id, typ], ...]}).
+CONFIG_REGDATA_SCHEMA = 'regdata_schema'
 
 # Bezpiecznik stronicowania historii alarmow (10 alarmow na strone).
 _MAX_ALARM_PAGES = 30
@@ -51,6 +59,8 @@ DEFAULT_DEBOUNCE_SEC = 10.0
 _PERIODIC_TASKS: dict[str, float] = {
     TASK_PARAMS: 15 * 60,
     TASK_ALARMS: 15 * 60,
+    # Ponawia nieudane pobranie schematu (np. timeout) - bez zapytania, gdy schemat aktualny.
+    TASK_REGDATA_SCHEMA_CHECK: 5 * 60,
 }
 
 _CATALOG_KEYS = {param.index: param.key for param in PARAMETERS}
@@ -76,6 +86,8 @@ class ControllerSync:
         self._due: dict[str, float] = {}        # zadania zlecone: zadanie -> termin
         self._periodic_next: dict[str, float] = {}  # zadania okresowe: zadanie -> termin
         self._current_task: Optional[str] = None
+        # Wersja schematu regdata znana aplikacji (w pamieci - listener nie moze czytac bazy).
+        self._regdata_schema_version: Optional[int] = None
         self._due_lock = threading.Lock()
         self._wakeup = threading.Event()
         self._running = False
@@ -137,6 +149,10 @@ class ControllerSync:
             self.request(TASK_PARAMS, delay=self._debounce_sec)
         if protocol.FRAME_GET_ALARMS in changes:
             self.request(TASK_ALARMS, delay=self._debounce_sec)
+        if protocol.FRAME_GET_REGDATA_SCHEMA in changes:
+            _, new_version = changes[protocol.FRAME_GET_REGDATA_SCHEMA]
+            if new_version != self._regdata_schema_version:
+                self.request(TASK_REGDATA_SCHEMA, delay=self._debounce_sec)
 
     # --------------------------------------------------------------- worker
 
@@ -194,6 +210,10 @@ class ControllerSync:
             self.sync_parameters()
         elif task == TASK_ALARMS:
             self.sync_alarms()
+        elif task == TASK_REGDATA_SCHEMA:
+            self.sync_regdata_schema(force=True)
+        elif task == TASK_REGDATA_SCHEMA_CHECK:
+            self.sync_regdata_schema(force=False)
 
     # ----------------------------------------------------------- parametry
 
@@ -315,3 +335,47 @@ class ControllerSync:
                 except Exception as e:
                     logger.error("Blad zglaszania alarmu sterownika: %s", e, exc_info=True)
         return stats
+
+    # ------------------------------------------------- dane regulatora
+
+    def _stored_regdata_schema(self) -> Optional[dict]:
+        raw = self._db.get_config(CONFIG_REGDATA_SCHEMA, '') or ''
+        if not raw:
+            return None
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) and isinstance(data.get('schema'), list) else None
+
+    def load_stored_regdata_schema(self) -> bool:
+        """Przekaz polaczeniu schemat zapisany w bazie (dekodowanie 0x08 od razu po starcie)."""
+        stored = self._stored_regdata_schema()
+        setter = getattr(self._connection, 'set_regdata_schema', None)
+        if not stored or setter is None:
+            return False
+        setter(stored['schema'], stored.get('version'))
+        self._regdata_schema_version = stored.get('version')
+        return True
+
+    def sync_regdata_schema(self, force: bool = True) -> int:
+        """Pobierz schemat ze sterownika, zapisz go i przekaz polaczeniu. Zwraca liczbe pol.
+
+        force=False: pomin zapytanie, gdy polaczenie ma schemat zgodny z aktualna wersja 0x55.
+        """
+        if not hasattr(self._connection, 'request_regdata_schema'):
+            return 0
+        current_version = getattr(self._connection, 'frame_versions', {}).get(protocol.FRAME_GET_REGDATA_SCHEMA)
+        has_schema = bool(getattr(self._connection, 'regdata_schema', None))
+        if not force and has_schema and current_version == self._regdata_schema_version:
+            return 0
+        schema = self._connection.request_regdata_schema()
+        if not schema:
+            logger.info("Sterownik zwrocil pusty schemat danych regulatora")
+            return 0
+        version = current_version
+        self._db.set_config(CONFIG_REGDATA_SCHEMA, json.dumps({'version': version, 'schema': schema}))
+        self._connection.set_regdata_schema(schema, version)
+        self._regdata_schema_version = version
+        logger.info("Pobrano schemat danych regulatora: %d pol (wersja %s)", len(schema), version)
+        return len(schema)

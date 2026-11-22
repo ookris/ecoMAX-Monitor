@@ -34,7 +34,15 @@ from derived_data import apply_config_overrides, is_fuel_level_not_set, parse_no
 from econet.alarms import alarm_name
 from econet.ecomax_parameters import ECOMAX_P_PARAMETERS
 from econet.mixer_parameters import MIXER_PARAMETERS, MIXER_PARAMETERS_BY_KEY, get_mixer_parameter_info
-from controller_sync import TASK_ALARMS
+from controller_sync import CONFIG_ALARMS_IMPORTED, CONFIG_REGDATA_SCHEMA, TASK_ALARMS, TASK_REGDATA_SCHEMA
+from econet import regdata as regdata_module
+
+# Klucze konfiguracji uzywane wewnetrznie (nie sa ustawieniami uzytkownika - pomijane w /api/config).
+CONFIG_REGDATA_LABELS = 'regdata_labels'
+_INTERNAL_CONFIG_KEYS = frozenset({CONFIG_REGDATA_SCHEMA, CONFIG_REGDATA_LABELS, CONFIG_ALARMS_IMPORTED})
+_REGDATA_LABEL_MAX_LEN = 80
+_regdata_labels_lock = threading.Lock()
+_JS_SAFE_INT = 2 ** 53 - 1
 from sensors import DASHBOARD_TILE_DEFINITIONS, DASHBOARD_TILE_KEYS
 
 bp = Blueprint('main', __name__)
@@ -2431,6 +2439,91 @@ def refresh_controller_alarms():
     return jsonify({'status': 'ok', 'message': 'Zlecono odczyt alarmów ze sterownika'})
 
 
+def _regdata_labels() -> dict:
+    raw = (_database.get_config(CONFIG_REGDATA_LABELS, '') if _database else '') or ''
+    try:
+        labels = json.loads(raw) if raw else {}
+    except ValueError:
+        labels = {}
+    return labels if isinstance(labels, dict) else {}
+
+
+@bp.route('/api/regdata', methods=['GET'])
+def get_regdata():
+    """Ostatnie dane regulatora (ramka 0x08) z nazwami pol."""
+    schema = list(getattr(_connection, 'regdata_schema', []) or []) if _connection else []
+    last = getattr(_connection, 'last_regdata', None) if _connection else None
+    labels = _regdata_labels()
+    rows = []
+    for row in (last or {}).get('rows', []):
+        name, source = regdata_module.field_name(row['id'], labels)
+        value = row['value']
+        if isinstance(value, int) and not isinstance(value, bool) and abs(value) > _JS_SAFE_INT:
+            value = str(value)   # JSON.parse w przegladarce zaokraglilby liczby 64-bitowe
+        rows.append({
+            'position': row['position'],
+            'id': row['id'],
+            'type': row['type'],
+            'type_name': regdata_module.TYPE_NAMES.get(row['type'], str(row['type'])),
+            'value': value,
+            'name': name,
+            'name_source': source,
+        })
+    status = 'ok' if rows else ('no_schema' if not schema else 'no_data')
+    return jsonify({
+        'status': status,
+        'schema_fields': len(schema),
+        'timestamp': (last or {}).get('timestamp'),
+        'decode_errors': getattr(_connection, 'regdata_decode_errors', 0) if _connection else 0,
+        'data': rows,
+    })
+
+
+@bp.route('/api/regdata/labels', methods=['POST'])
+def set_regdata_label():
+    """Ustaw wlasna nazwe pola danych regulatora (pusta nazwa usuwa etykiete)."""
+    if not _is_boiler_control_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Brak uprawnień'}), 403
+    if not _database:
+        return jsonify({'status': 'error', 'message': 'Brak bazy danych'}), 500
+    payload = request.get_json(silent=True) or {}
+    try:
+        field_id = int(payload.get('id'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Pole id musi być liczbą'}), 400
+    if not (0 <= field_id <= 0xFFFF):
+        return jsonify({'status': 'error', 'message': 'id poza zakresem 0-65535'}), 400
+    label = str(payload.get('label') or '').strip()
+    if len(label) > _REGDATA_LABEL_MAX_LEN:
+        return jsonify({'status': 'error', 'message': f'Nazwa może mieć maks. {_REGDATA_LABEL_MAX_LEN} znaków'}), 400
+
+    with _regdata_labels_lock:
+        labels = _regdata_labels()
+        if label:
+            labels[str(field_id)] = label
+        else:
+            labels.pop(str(field_id), None)
+        saved = _database.set_config(CONFIG_REGDATA_LABELS, json.dumps(labels, ensure_ascii=False))
+    if not saved:
+        return jsonify({'status': 'error', 'message': 'Nie udało się zapisać nazwy'}), 500
+    return jsonify({'status': 'ok', 'data': {'id': field_id, 'label': label or None}})
+
+
+@bp.route('/api/regdata/refresh-schema', methods=['POST'])
+def refresh_regdata_schema():
+    """Zlec ponowne pobranie schematu danych regulatora (0x55)."""
+    if not _is_boiler_control_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Brak uprawnień'}), 403
+    if (
+        _controller_sync is None
+        or not _controller_sync.running
+        or not (_connection and getattr(_connection, 'connected', False))
+    ):
+        return jsonify({'status': 'error', 'message': 'Brak połączenia ze sterownikiem'}), 503
+    _controller_sync.request(TASK_REGDATA_SCHEMA)
+    return jsonify({'status': 'ok', 'message': 'Zlecono pobranie schematu danych regulatora'})
+
+
 @bp.route('/api/alerts/read', methods=['POST'])
 def mark_alerts_read():
     """Oznacz wszystkie alerty jako przeczytane."""
@@ -2462,7 +2555,7 @@ def alerts_page():
 def get_config():
     """Pobierz wszystkie ustawienia."""
     if _database:
-        data = _database.get_all_config()
+        data = {k: v for k, v in _database.get_all_config().items() if k not in _INTERNAL_CONFIG_KEYS}
         data['available_visible_sensors'] = list(DASHBOARD_TILE_KEYS)
         return jsonify({'status': 'ok', 'data': data})
     return jsonify({'status': 'error', 'data': {}})

@@ -275,6 +275,7 @@ def main():
     init_routes(connection, db, controller_sync)
 
     # Start polaczenia/symulatora
+    controller_sync.load_stored_regdata_schema()
     controller_sync.start()
     connection.start()
     alert_engine.start()

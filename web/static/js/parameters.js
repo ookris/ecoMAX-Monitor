@@ -132,10 +132,128 @@ function startAutoRefresh() {
         clearInterval(refreshTimer);
     }
 
-    refreshTimer = setInterval(refreshParameters, REFRESH_INTERVAL_MS);
+    refreshTimer = setInterval(() => {
+        refreshParameters();
+        refreshRegdata();
+    }, REFRESH_INTERVAL_MS);
+}
+
+// ---- Dane regulatora (0x08) ----
+
+// Własny komunikat sekcji: wspólny #parameters-msg jest czyszczony przy każdym odświeżeniu.
+function showRegdataMessage(text, type = 'ok') {
+    const el = document.getElementById('regdata-msg');
+    if (!el) return;
+    el.textContent = text;
+    el.className = `settings-msg ${type}`;
+    el.style.display = text ? 'block' : 'none';
+    if (text) setTimeout(() => { el.style.display = 'none'; }, 8000);
+}
+
+function regdataValueText(row) {
+    if (row.value === null || row.value === undefined) return '---';
+    if (typeof row.value === 'boolean') return row.value ? 'TAK' : 'NIE';
+    return String(row.value);
+}
+
+async function saveRegdataLabel(fieldId, currentName) {
+    const label = prompt(`Nazwa pola ID ${fieldId} (puste = usuń własną nazwę):`, currentName || '');
+    if (label === null) return;
+    try {
+        const resp = await fetch('/api/regdata/labels', {
+            method: 'POST',
+            headers: controlHeaders(),
+            body: JSON.stringify({ id: fieldId, label }),
+        });
+        const json = await resp.json();
+        if (json.status !== 'ok') {
+            showRegdataMessage(json.message || 'Nie udało się zapisać nazwy pola.', 'error');
+            return;
+        }
+        refreshRegdata();
+    } catch (e) {
+        showRegdataMessage('Błąd zapisu nazwy: ' + e.message, 'error');
+    }
+}
+
+async function refreshRegdata() {
+    const body = document.getElementById('regdata-body');
+    const statusEl = document.getElementById('regdata-status');
+    if (!body) return;
+    try {
+        const resp = await fetch('/api/regdata');
+        const json = await resp.json();
+        const namedOnly = !!document.getElementById('regdata-named-only')?.checked;
+        if (statusEl) {
+            const parts = [`Pól w schemacie: ${json.schema_fields}`];
+            if (json.timestamp) parts.push(`ostatnia ramka: ${new Date(json.timestamp * 1000).toLocaleTimeString('pl-PL')}`);
+            if (json.decode_errors) parts.push(`błędy dekodowania: ${json.decode_errors}`);
+            if (json.status === 'no_schema') parts.push('brak schematu – zostanie pobrany automatycznie po połączeniu');
+            statusEl.textContent = parts.join(' · ');
+        }
+        body.textContent = '';
+        const rows = (json.data || []).filter((r) => !namedOnly || r.name);
+        if (!rows.length) {
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 6;
+            td.className = 'parameters-empty';
+            td.textContent = json.status === 'ok' ? 'Brak pól do wyświetlenia.' : 'Brak danych regulatora.';
+            tr.appendChild(td);
+            body.appendChild(tr);
+            return;
+        }
+        for (const row of rows) {
+            const tr = document.createElement('tr');
+            const nameText = row.name ? (row.name + (row.name_source === 'guess' ? ' ?' : '')) : '—';
+            for (const text of [row.position, row.id, row.type_name, regdataValueText(row), nameText]) {
+                const td = document.createElement('td');
+                td.textContent = String(text);
+                tr.appendChild(td);
+            }
+            const actionTd = document.createElement('td');
+            const btn = document.createElement('button');
+            btn.className = 'btn-ghost';
+            btn.textContent = 'Nazwij';
+            btn.addEventListener('click', () => saveRegdataLabel(row.id, row.name_source === 'user' ? row.name : ''));
+            actionTd.appendChild(btn);
+            tr.appendChild(actionTd);
+            body.appendChild(tr);
+        }
+    } catch (e) {
+        if (statusEl) statusEl.textContent = 'Błąd pobierania danych regulatora: ' + e.message;
+    }
+}
+
+function controlHeaders() {
+    const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'ecoMAX-Monitor' };
+    try {
+        const token = window.localStorage?.getItem('boilerControlAccessToken');
+        if (token) headers['X-Boiler-Control-Token'] = String(token).trim();
+    } catch (e) {
+        // Brak localStorage - bez tokenu.
+    }
+    return headers;
+}
+
+async function refreshRegdataSchema() {
+    try {
+        const resp = await fetch('/api/regdata/refresh-schema', {
+            method: 'POST',
+            headers: controlHeaders(),
+            body: '{}',
+        });
+        const json = await resp.json();
+        showRegdataMessage(json.message || '', json.status === 'ok' ? 'ok' : 'error');
+        setTimeout(refreshRegdata, 5000);
+    } catch (e) {
+        showRegdataMessage('Błąd: ' + e.message, 'error');
+    }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
     refreshParameters();
+    refreshRegdata();
+    document.getElementById('regdata-named-only')?.addEventListener('change', refreshRegdata);
     startAutoRefresh();
 });

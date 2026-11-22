@@ -33,6 +33,31 @@
             </table>
         </div>
     </section>
+
+    <section class="settings-section" id="regdata-section">
+        <div class="panel-head parameters-header">
+            <div>
+                <h2>Dane regulatora (ramka 0x08)</h2>
+                <p class="settings-note">Wszystkie pola, które sterownik rozsyła w ramce danych regulatora, zdekodowane wg schematu pobranego ze sterownika. Pola oznaczone „?” mają opis przypuszczalny; możesz nadać polu własną nazwę.</p>
+            </div>
+            <div class="toolbar-actions">
+                <label class="check"><input type="checkbox" id="regdata-named-only"> <span>Tylko nazwane pola</span></label>
+                <button class="btn-secondary" onclick="refreshRegdataSchema()"><iconify-icon icon="mdi:database-refresh"></iconify-icon> Pobierz schemat</button>
+            </div>
+        </div>
+        <div id="regdata-msg" class="settings-msg" style="display:none"></div>
+        <p id="regdata-status" class="settings-hint"></p>
+        <div class="parameters-table-wrap">
+            <table class="parameters-table">
+                <thead>
+                    <tr><th>Poz.</th><th>ID</th><th>Typ</th><th>Wartość</th><th>Nazwa</th><th></th></tr>
+                </thead>
+                <tbody id="regdata-body">
+                    <tr><td colspan="6" class="parameters-empty">Ładowanie…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
 {% endblock %}
 
 {% block scripts %}

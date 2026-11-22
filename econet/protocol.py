@@ -40,6 +40,8 @@ FRAME_GET_SCHEDULES = 0x36
 FRAME_SET_SCHEDULE = 0x37
 FRAME_GET_THERMOSTAT_PARAMS = 0x5C
 FRAME_GET_SERVICE_PARAMS = 0x61
+FRAME_GET_REGDATA_SCHEMA = 0x55
+FRAME_REGDATA = 0x08
 FRAME_SET_THERMOSTAT_PARAM = 0x5D
 
 # Typy ramek - odpowiedzi
@@ -56,6 +58,7 @@ FRAME_ALARMS_ANS = 0xBD
 FRAME_SET_THERMOSTAT_PARAM_ANS = 0xDD
 FRAME_GET_THERMOSTAT_PARAMS_ANS = 0xDC
 FRAME_GET_SERVICE_PARAMS_ANS = 0xE1
+FRAME_REGDATA_SCHEMA_ANS = 0xD5
 FRAME_TIME = 0x89
 
 # Minimalne/maksymalne dlugosci
@@ -259,6 +262,11 @@ class FrameBuilder:
         """Ramka 0x61 - pobierz parametry serwisowe."""
         body = bytes([FRAME_GET_SERVICE_PARAMS, count & 0xFF, start & 0xFF])
         return FrameBuilder.create_frame(dest_addr, body)
+
+    @staticmethod
+    def request_regdata_schema(dest_addr=ADDR_ECOMAX):
+        """Ramka 0x55 - pobierz schemat danych regulatora (ramka 0x08)."""
+        return FrameBuilder.create_frame(dest_addr, bytes([FRAME_GET_REGDATA_SCHEMA]))
 
     @staticmethod
     def set_boiler_control(dest_addr=ADDR_ECOMAX, value=0):

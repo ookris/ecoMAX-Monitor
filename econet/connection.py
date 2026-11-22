@@ -13,7 +13,7 @@ import queue
 
 from functools import reduce
 
-from econet import alarms, protocol, decoder
+from econet import alarms, protocol, decoder, regdata
 from econet.mixer_parameters import parse_mixer_parameters_payload
 
 logger = logging.getLogger(__name__)
@@ -93,7 +93,14 @@ class EW11AConnection:
             protocol.FRAME_GET_MIXER_PARAMS_ANS: queue.Queue(maxsize=5),
             protocol.FRAME_GET_SERVICE_PARAMS_ANS: queue.Queue(maxsize=5),
             protocol.FRAME_SET_BOILER_CONTROL_ANS: queue.Queue(maxsize=5),
+            protocol.FRAME_REGDATA_SCHEMA_ANS: queue.Queue(maxsize=5),
         }
+
+        # Dane regulatora (ramka 0x08) dekodowane wg schematu z 0x55/0xD5
+        self._regdata_schema: list[tuple[int, int]] = []
+        self._regdata_schema_version: int | None = None
+        self._last_regdata: dict | None = None
+        self.regdata_decode_errors = 0
         self._device_info: dict | None = None
 
         # Tabela wersji ramek z 0x35 i nasluchujacy zmian (patrz add_frame_version_listener)
@@ -291,6 +298,9 @@ class EW11AConnection:
             if boiler_data:
                 self._update_data(boiler_data)
 
+        elif frame_type == protocol.FRAME_REGDATA:
+            self._handle_regdata_frame(frame)
+
         elif frame_type == protocol.FRAME_CHECK_DEVICE:
             # Sterownik pyta czy jestesmy - odpowiadamy B0
             if self._socket and self._connected:
@@ -343,6 +353,51 @@ class EW11AConnection:
                 listener(changes)
             except Exception as e:
                 logger.error("Blad listenera wersji ramek: %s", e, exc_info=True)
+
+    # ------------------------------------------------- dane regulatora (0x08)
+
+    def set_regdata_schema(self, schema, version=None) -> None:
+        """Ustaw schemat danych regulatora; `version` = wersja ramki 0x55, z ktorej pochodzi."""
+        with self._lock:
+            self._regdata_schema = [(int(i), int(t)) for i, t in (schema or [])]
+            self._regdata_schema_version = int(version) if version is not None else None
+            self._last_regdata = None
+            self.regdata_decode_errors = 0
+
+    @property
+    def regdata_schema(self) -> list[tuple[int, int]]:
+        with self._lock:
+            return list(self._regdata_schema)
+
+    @property
+    def last_regdata(self) -> dict | None:
+        with self._lock:
+            return self._last_regdata
+
+    def _handle_regdata_frame(self, frame) -> None:
+        if frame.get('source') != protocol.ADDR_ECOMAX:
+            return
+        with self._lock:
+            schema = self._regdata_schema
+            schema_version = self._regdata_schema_version
+        if not schema:
+            return
+        rows = regdata.decode_regdata_payload(bytes(frame.get('payload') or b''), schema, schema_version)
+        with self._lock:
+            if rows is None:
+                self.regdata_decode_errors += 1
+                return
+            self._last_regdata = {'timestamp': time.time(), 'rows': rows}
+
+    def request_regdata_schema(self, timeout=3.0) -> list[tuple[int, int]]:
+        """Pobierz schemat danych regulatora (0x55 -> 0xD5)."""
+        frame = self._request_response(
+            protocol.FrameBuilder.request_regdata_schema(dest_addr=protocol.ADDR_ECOMAX),
+            protocol.FRAME_REGDATA_SCHEMA_ANS,
+            timeout,
+            'Brak odpowiedzi na zapytanie o schemat danych regulatora (0xD5)',
+        )
+        return regdata.parse_schema_payload(bytes(frame.get('payload') or b''))
 
     def _drain_response_queue(self, frame_type):
         response_queue = self._response_queues.get(frame_type)
