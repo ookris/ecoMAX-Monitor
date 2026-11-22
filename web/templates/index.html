@@ -51,6 +51,15 @@
             <div class="pump-indicator" id="pump-circ">
                 <span class="pump-dot off"></span><span>Cyrkulacja</span>
             </div>
+            <div class="pump-indicator" id="out-fan" title="Wentylator nadmuchu">
+                <span class="pump-dot off"></span><span>Wentylator</span>
+            </div>
+            <div class="pump-indicator" id="out-feeder" title="Podajnik pracuje impulsowo - stan odświeżany co kilka sekund">
+                <span class="pump-dot off"></span><span>Podajnik</span>
+            </div>
+            <div class="pump-indicator" id="out-lighter" title="Zapalarka (grzałka rozpalania)">
+                <span class="pump-dot off"></span><span>Zapalarka</span>
+            </div>
         </div>
 
         <div class="mode-datetime" aria-label="Czas sterownika">
@@ -193,6 +202,9 @@
             Wszystkie kafelki są ukryte. Wybierz widoczne pomiary w <a href="/settings">ustawieniach</a>.
         </div>
     </section>
+
+    <!-- Obiegi mieszaczy (widoczne, gdy sterownik raportuje podłączony mieszacz) -->
+    <section class="tiles-grid" id="mixers-section" aria-label="Obiegi mieszaczy" style="display:none"></section>
 
     <!-- Statystyki licznikowe -->
     <section class="panel stats-section" id="poc-stats" style="display:none">

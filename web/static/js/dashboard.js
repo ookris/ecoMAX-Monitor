@@ -368,6 +368,12 @@ function updateDashboard(data) {
     setPump('pump-co', data.pump_co);
     setPump('pump-cwu', data.pump_cwu);
     setPump('pump-circ', data.pump_circulation);
+    setPump('out-fan', data.fan_on);
+    setPump('out-feeder', data.feeder_on);
+    setPump('out-lighter', data.lighter_on);
+
+    // Mieszacze
+    updateMixers(data.mixer_data);
 
     // Statystyki PoC
     if (data.fuel_burned_kg !== null && data.fuel_burned_kg !== undefined) {
@@ -376,6 +382,49 @@ function updateDashboard(data) {
         setVal('val-ignitions', data.ignitions || '--');
         setVal('val-work-100', data.work_time_100 || '--');
         setVal('val-work-50', data.work_time_50 || '--');
+    }
+}
+
+// Kafle mieszaczy: tylko mieszacze z odczytem temperatury (podłączone).
+function updateMixers(mixers) {
+    const section = document.getElementById('mixers-section');
+    if (!section) return;
+    const connected = (Array.isArray(mixers) ? mixers : [])
+        .map((mixer, index) => ({ ...mixer, index }))
+        .filter((mixer) => mixer.current_temp !== null && mixer.current_temp !== undefined);
+
+    section.style.display = connected.length ? '' : 'none';
+    const seen = new Set();
+    for (const mixer of connected) {
+        const tileId = `tile-mixer-${mixer.index}`;
+        seen.add(tileId);
+        let tile = document.getElementById(tileId);
+        if (!tile) {
+            tile = document.createElement('div');
+            tile.className = 'tile';
+            tile.id = tileId;
+            tile.innerHTML = `
+                <div class="tile-head"><iconify-icon icon="mdi:valve" class="tile-icon"></iconify-icon><span class="tile-label"></span></div>
+                <div class="tile-value"><span class="mixer-temp">--</span><small>°C</small></div>
+                <div class="tile-set">Zadana <strong><span class="mixer-target">--</span> °C</strong></div>
+                <div class="meter" aria-hidden="true"><div class="meter-fill mixer-valve-meter"></div></div>
+                <div class="tile-set">Zawór <strong><span class="mixer-valve">--</span>%</strong> <span class="mixer-valve-dir"></span></div>
+                <div class="pump-indicator mixer-pump"><span class="pump-dot off"></span><span>Pompa mieszacza</span></div>`;
+            tile.querySelector('.tile-label').textContent = `Mieszacz ${mixer.index + 1}`;
+            section.appendChild(tile);
+        }
+        tile.querySelector('.mixer-temp').textContent = formatTemp(mixer.current_temp);
+        tile.querySelector('.mixer-target').textContent = mixer.target_temp ?? '--';
+        const valve = mixer.valve_position;
+        tile.querySelector('.mixer-valve').textContent = valve ?? '--';
+        tile.querySelector('.mixer-valve-meter').style.width = (valve === null || valve === undefined) ? '0%' : `${Math.max(0, Math.min(100, valve))}%`;
+        tile.querySelector('.mixer-valve-dir').textContent = mixer.valve_opening ? '▲ otwiera' : (mixer.valve_closing ? '▼ zamyka' : '');
+        const dot = tile.querySelector('.mixer-pump .pump-dot');
+        dot.classList.toggle('on', !!mixer.pump);
+        dot.classList.toggle('off', !mixer.pump);
+    }
+    for (const tile of Array.from(section.children)) {
+        if (!seen.has(tile.id)) tile.remove();
     }
 }
 

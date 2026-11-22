@@ -102,15 +102,48 @@ TEMP_NAMES = {
 # (PyPlumIO, issue #19 - ecoMAX 860P6-O).
 FUEL_LEVEL_OFFSET = 101
 
-# Flagi wyjsc (z ecomax.py linia 1016-1021)
-OUTPUT_FLAGS = {
-    0x04: 'pump_co',
-    0x08: 'pump_cwu',
-    0x10: 'pump_circulation',
-    0x800: 'pump_solar',
-    0x1000: 'pump_fireplace',
-    0x2000: 'contact_gzc',
+# Bity slowa wyjsc w ramce 0x35 (kolejnosc jak PyPlumIO sensor_data.OUTPUTS).
+OUTPUT_BITS: tuple[str, ...] = (
+    'fan_on',            # 0  wentylator nadmuchu
+    'feeder_on',         # 1  podajnik
+    'pump_co',           # 2  pompa CO
+    'pump_cwu',          # 3  pompa CWU
+    'pump_circulation',  # 4  pompa cyrkulacji
+    'lighter_on',        # 5  zapalarka
+    'alarm_output',      # 6  wyjscie alarmowe
+    'outer_boiler_on',   # 7  kociol zewnetrzny/rezerwowy
+    'fan2_exhaust_on',   # 8  wentylator wyciagowy spalin
+    'feeder2_on',        # 9  podajnik 2
+    'outer_feeder_on',   # 10 podajnik zewnetrzny
+    'pump_solar',        # 11 pompa solarna
+    'pump_fireplace',    # 12 pompa kominka
+    'contact_gcz',       # 13 styk GCZ
+    'blow_fan1_on',      # 14 wentylator przedmuchu 1
+    'blow_fan2_on',      # 15 wentylator przedmuchu 2
+)
+
+# Etykiety do UI/API (stany wyjsc).
+OUTPUT_LABELS: dict[str, str] = {
+    'fan_on': 'Wentylator',
+    'feeder_on': 'Podajnik',
+    'pump_co': 'Pompa CO',
+    'pump_cwu': 'Pompa CWU',
+    'pump_circulation': 'Pompa cyrkulacji',
+    'lighter_on': 'Zapalarka',
+    'alarm_output': 'Wyjście alarmowe',
+    'outer_boiler_on': 'Kocioł zewnętrzny',
+    'fan2_exhaust_on': 'Wentylator wyciągowy',
+    'feeder2_on': 'Podajnik 2',
+    'outer_feeder_on': 'Podajnik zewnętrzny',
+    'pump_solar': 'Pompa solarna',
+    'pump_fireplace': 'Pompa kominka',
+    'contact_gcz': 'Styk GCZ',
+    'blow_fan1_on': 'Wentylator przedmuchu 1',
+    'blow_fan2_on': 'Wentylator przedmuchu 2',
 }
+
+# Stany sondy lambda (PyPlumIO LambdaState).
+LAMBDA_STATE_NAMES = {0: 'Stop', 1: 'Start', 3: 'Praca'}
 
 
 def _parse_float32(data):
@@ -287,10 +320,27 @@ class BoilerData:
         self.fuel_level_not_set = False
         self.boiler_power_source = None  # 'controller' | 'calculated' | None
 
-        # Pompy
-        self.pump_co = False
-        self.pump_cwu = False
-        self.pump_circulation = False
+        # Wyjscia (pompy, wentylator, podajnik, zapalarka...) - patrz OUTPUT_BITS
+        for output_name in OUTPUT_BITS:
+            setattr(self, output_name, False)
+        self.outputs_raw: int | None = None
+        self.output_flags_raw: int | None = None
+
+        # Statusy obiegow i pozostale pola ramki 0x35
+        self.heating_status: int | None = None
+        self.water_heater_status: int | None = None
+        self.pending_alerts: list[int] = []
+        self.transmission: int | None = None
+        self.thermostat_contact: int | None = None  # styk termostatu pokojowego
+
+        # Sonda lambda (ecoLAMBDA)
+        self.lambda_state: int | None = None
+        self.lambda_target: int | None = None
+        self.lambda_level: float | None = None
+
+        # Tabela wersji ramek {typ_ramki: wersja} - zmiana wersji oznacza,
+        # ze dane danego typu (parametry, alarmy, harmonogramy...) zmienily sie.
+        self.frame_versions: dict[int, int] = {}
 
         # Z PoC
         self.flame = None
@@ -329,6 +379,16 @@ class BoilerData:
         self.module_ecolambda: str | None = None
         self.module_ecoster: str | None = None
         self.module_panel: str | None = None
+
+    def _first_mixer_fields(self) -> dict:
+        """Plaskie pola pierwszego mieszacza (do bazy, CSV, HA, Prometheus)."""
+        first = self.mixer_data[0] if self.mixer_data else {}
+        return {
+            'mixer1_temp': first.get('current_temp'),
+            'mixer1_target': first.get('target_temp'),
+            'mixer1_pump': first.get('pump') if first.get('current_temp') is not None else None,
+            'mixer1_valve': first.get('valve_position'),
+        }
 
     def is_plausible(self) -> bool:
         """Sprawdz czy zdekodowane dane sa fizycznie wiarygodne.
@@ -399,9 +459,20 @@ class BoilerData:
             'fuel_stream': self.fuel_stream,
             'fuel_level_not_set': self.fuel_level_not_set,
             'boiler_power_source': self.boiler_power_source,
-            'pump_co': self.pump_co,
-            'pump_cwu': self.pump_cwu,
-            'pump_circulation': self.pump_circulation,
+            **{name: getattr(self, name) for name in OUTPUT_BITS},
+            'outputs_raw': self.outputs_raw,
+            'output_flags_raw': self.output_flags_raw,
+            'heating_status': self.heating_status,
+            'water_heater_status': self.water_heater_status,
+            'pending_alerts': list(self.pending_alerts),
+            'pending_alerts_count': len(self.pending_alerts),
+            'transmission': self.transmission,
+            'thermostat_contact': self.thermostat_contact,
+            'lambda_state': self.lambda_state,
+            'lambda_state_name': LAMBDA_STATE_NAMES.get(self.lambda_state) if self.lambda_state is not None else None,
+            'lambda_target': self.lambda_target,
+            'lambda_level': self.lambda_level,
+            'frame_versions': {f'0x{k:02X}': v for k, v in sorted(self.frame_versions.items())},
             'flame': self.flame,
             'blower': self.blower,
             'fuel_burned_kg': self.fuel_burned_kg,
@@ -421,6 +492,7 @@ class BoilerData:
             'mixers_available': self.mixers_available,
             'mixers_connected': self.mixers_connected,
             'mixer_data': self.mixer_data,
+            **self._first_mixer_fields(),
             'thermostats_available': self.thermostats_available,
             'thermostats_connected': self.thermostats_connected,
             'thermostat_data': self.thermostat_data,
@@ -576,7 +648,12 @@ def _decode_extended_sensor_data(payload: bytes, idx: int, data: 'BoilerData') -
     if payload[idx] == 0xFF:
         idx += 1
     else:
-        idx += 4  # pomijamy wartości lambda (rzadko potrzebne)
+        if idx + 4 > len(payload):
+            return
+        data.lambda_state = payload[idx]
+        data.lambda_target = payload[idx + 1]
+        data.lambda_level = _parse_uint16_le(payload[idx + 2:idx + 4]) / 10
+        idx += 4
 
     # --- Termostaty: 0xFF=skip LUB contacts(1) + count(1) + 9 bajtów × count ---
     if idx >= len(payload):
@@ -584,8 +661,9 @@ def _decode_extended_sensor_data(payload: bytes, idx: int, data: 'BoilerData') -
     if payload[idx] == 0xFF:
         idx += 1
     else:
-        # contacts = bitmask podłączonych termostatów
-        idx += 1  # pomijamy contacts
+        # contacts: bity 0-2 = styk termostatu, bity 3-5 = praca wg harmonogramu
+        contacts = payload[idx]
+        idx += 1
         if idx >= len(payload):
             return
         thermostats_count = payload[idx]
@@ -593,7 +671,7 @@ def _decode_extended_sensor_data(payload: bytes, idx: int, data: 'BoilerData') -
         if thermostats_count > 8:  # sanity check
             return
         thermostat_list = []
-        for _ in range(thermostats_count):
+        for therm_index in range(thermostats_count):
             if idx + 9 > len(payload):
                 break
             state = payload[idx]
@@ -604,13 +682,19 @@ def _decode_extended_sensor_data(payload: bytes, idx: int, data: 'BoilerData') -
                 'state': state,
                 'current_temp': current_temp,
                 'target_temp': target_temp,
+                # Bajt contacts opisuje tylko 3 termostaty (bity 0-2 i 3-5).
+                'contact': bool(contacts & (1 << therm_index)) if therm_index < 3 else None,
+                'schedule': bool(contacts & (1 << (therm_index + 3))) if therm_index < 3 else None,
             })
         data.thermostats_available = thermostats_count
         data.thermostat_data = thermostat_list
         data.thermostats_connected = sum(1 for t in thermostat_list if t['current_temp'] is not None)
 
     # --- Mieszacze: count(1) + 8 bajtów × count ---
-    # Format: mixerTemp:f32(4), mixerSetTemp:u8(1), reserved(1), mixerOutputs:u8(1), reserved(1)
+    # Format: mixerTemp:f32(4), mixerSetTemp:u8(1), reserved(1), mixerOutputs:u8(1), valve:u8(1)
+    # mixerOutputs: bit0 = pompa, bit1 = zawor otwiera, bit2 = zawor zamyka
+    # (zweryfikowane na nagraniu ecoMAX920P1: kierunek zgodny z temp. vs zadana).
+    # valve = pozycja zaworu 0-100% (identyczna z polem 140 ramki regdata 0x08).
     if idx >= len(payload):
         return
     mixers_count = payload[idx]
@@ -624,12 +708,17 @@ def _decode_extended_sensor_data(payload: bytes, idx: int, data: 'BoilerData') -
         temp = _parse_float32(payload[idx:idx + 4])
         target = payload[idx + 4]
         outputs = payload[idx + 6]
+        extra = payload[idx + 7]
         idx += 8
         pump_on = bool(outputs & 0x01)
         mixer_list.append({
             'current_temp': temp,
             'target_temp': target if target != 0xFF else None,
             'pump': pump_on,
+            'valve_position': extra if (temp is not None and extra <= 100) else None,
+            'valve_opening': bool(outputs & 0x02),
+            'valve_closing': bool(outputs & 0x04),
+            'outputs_raw': outputs,
         })
     data.mixers_available = mixers_count
     data.mixer_data = mixer_list
@@ -651,6 +740,10 @@ def decode_econet_data_frame(payload):
     if idx is None:
         logger.debug("Nie znaleziono poprawnego bloku danych w ramce 0x35")
         return None
+    if idx > 0:
+        versions, versions_end = parse_frame_versions(payload)
+        if versions and versions_end == idx:
+            data.frame_versions = versions
 
     try:
         # Tryb pracy (1 bajt)
@@ -663,12 +756,13 @@ def decode_econet_data_frame(payload):
             return data
         outputs = _parse_uint32_le(payload[idx:idx + 4])
         if outputs is not None:
-            data.pump_co = bool(outputs & 0x04)
-            data.pump_cwu = bool(outputs & 0x08)
-            data.pump_circulation = bool(outputs & 0x10)
+            data.outputs_raw = outputs
+            for bit, output_name in enumerate(OUTPUT_BITS):
+                setattr(data, output_name, bool(outputs & (1 << bit)))
         idx += 4
 
-        # Flagi wyjsc (4 bajty) - pomijamy, uzywamy outputs wyzej
+        # Flagi wyjsc (4 bajty): ktore wyjscia sa skonfigurowane w sterowniku
+        data.output_flags_raw = _parse_uint32_le(payload[idx:idx + 4])
         idx += 4
 
         # Liczba temperatur (1 bajt)
@@ -696,9 +790,9 @@ def decode_econet_data_frame(payload):
         # Temperatura CO zadana, status CO, temp CWU zadana, status CWU
         if idx + 4 <= len(payload):
             data.temp_co_set = _parse_uint8(payload[idx:idx + 1])
-            # status_co = payload[idx + 1]
+            data.heating_status = payload[idx + 1]
             data.temp_cwu_set = _parse_uint8(payload[idx + 2:idx + 3])
-            # status_cwu = payload[idx + 3]
+            data.water_heater_status = payload[idx + 3]
             idx += 4
         else:
             return data
@@ -707,17 +801,18 @@ def decode_econet_data_frame(payload):
         if idx >= len(payload):
             return data
         alarms_no = payload[idx]
+        data.pending_alerts = list(payload[idx + 1:idx + 1 + alarms_no])
         idx += 1 + alarms_no
 
         # Fuel level, transmission, fan power, boiler power, power kW, fuel stream, thermostat
         if idx + 16 <= len(payload):
             data.fuel_level = _decode_fuel_level(payload[idx])
-            # transmission = payload[idx + 1]
+            data.transmission = payload[idx + 1]
             data.fan_power = _parse_float32(payload[idx + 2:idx + 6])
             data.boiler_power = _parse_uint8(payload[idx + 6:idx + 7])
             data.boiler_power_kw = _parse_float32(payload[idx + 7:idx + 11])
             data.fuel_stream = _parse_float32(payload[idx + 11:idx + 15])
-            # thermostat = payload[idx + 15]
+            data.thermostat_contact = payload[idx + 15] if payload[idx + 15] != 0xFF else None
             idx += 16
         else:
             logger.debug("EcoNET decode: brak danych operacyjnych")

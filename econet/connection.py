@@ -67,6 +67,10 @@ class EW11AConnection:
         }
         self._device_info: dict | None = None
 
+        # Tabela wersji ramek z 0x35 i nasluchujacy zmian (patrz add_frame_version_listener)
+        self._frame_versions: dict[int, int] = {}
+        self._frame_version_listeners: list = []
+
         # Statystyki
         self.frames_received = 0
         self.bytes_received = 0
@@ -276,6 +280,40 @@ class EW11AConnection:
 
         else:
             logger.debug("Ramka typu 0x%02X (nieobslugiwana)", frame_type)
+
+    def add_frame_version_listener(self, callback):
+        """Zarejestruj callback(changes) wywolywany przy zmianie wersji ramek.
+
+        `changes` to dict {typ_ramki: (stara_wersja | None, nowa_wersja)}; przy
+        pierwszej obserwacji stara wersja to None. Callback jest wywolywany w watku
+        odczytu z EW11A, wiec NIE moze blokowac ani wysylac zapytan synchronicznie
+        (odpowiedz odbiera ten sam watek) - powinien jedynie zlecic prace.
+        """
+        self._frame_version_listeners.append(callback)
+
+    @property
+    def frame_versions(self) -> dict[int, int]:
+        with self._lock:
+            return dict(self._frame_versions)
+
+    def _process_frame_versions(self, versions):
+        if not versions:
+            return
+        with self._lock:
+            changes = {
+                frame_type: (self._frame_versions.get(frame_type), version)
+                for frame_type, version in versions.items()
+                if self._frame_versions.get(frame_type) != version
+            }
+            self._frame_versions.update(versions)
+        if not changes:
+            return
+        logger.debug("Zmiana wersji ramek: %s", {f'0x{k:02X}': v for k, v in changes.items()})
+        for listener in list(self._frame_version_listeners):
+            try:
+                listener(changes)
+            except Exception as e:
+                logger.error("Blad listenera wersji ramek: %s", e, exc_info=True)
 
     def _drain_response_queue(self, frame_type):
         response_queue = self._response_queues.get(frame_type)
@@ -648,6 +686,9 @@ class EW11AConnection:
                     "Odrzucono ramke z nieplauzybilnymi danymi (%d z rzędu).", bad
                 )
             return
+
+        # Wersje ramek tylko z ramek wiarygodnych (szum na RS485 nie wyzwala synchronizacji).
+        self._process_frame_versions(boiler_data.frame_versions)
 
         # Ramka poprawna – reset licznika i ewentualne INFO o odbudowie
         with self._lock:

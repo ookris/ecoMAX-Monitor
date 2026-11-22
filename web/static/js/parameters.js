@@ -44,6 +44,15 @@ function formatValue(value, unit) {
         return value ? 'TAK' : 'NIE';
     }
 
+    if (Array.isArray(value)) {
+        return value.length ? value.join(', ') : 'brak';
+    }
+
+    if (typeof value === 'object') {
+        const entries = Object.entries(value);
+        return entries.length ? entries.map(([k, v]) => `${k}: ${v}`).join(', ') : 'brak';
+    }
+
     if (typeof value === 'number') {
         if (!Number.isFinite(value)) return '---';
         const rounded = Math.round(value * 10) / 10;

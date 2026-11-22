@@ -37,11 +37,27 @@ _MEASUREMENT_COLUMNS: tuple[str, ...] = (
     'mode', 'mode_name', 'pump_co', 'pump_cwu', 'pump_circulation',
     'flame', 'blower', 'fuel_burned_kg', 'ignitions',
     'boiler_power_source',
+    'fan_on', 'feeder_on', 'lighter_on', 'alarm_output',
+    'thermostat_contact', 'heating_status', 'water_heater_status',
+    'pending_alerts_count',
+    'mixer1_temp', 'mixer1_target', 'mixer1_pump', 'mixer1_valve',
 )
 
 # Kolumny dodane po pierwszej wersji schematu: migracja addytywna (ALTER TABLE ADD COLUMN).
 _MEASUREMENT_ADDED_COLUMNS: dict[str, str] = {
     'boiler_power_source': 'TEXT',
+    'fan_on': 'INTEGER',
+    'feeder_on': 'INTEGER',
+    'lighter_on': 'INTEGER',
+    'alarm_output': 'INTEGER',
+    'thermostat_contact': 'INTEGER',
+    'heating_status': 'INTEGER',
+    'water_heater_status': 'INTEGER',
+    'pending_alerts_count': 'INTEGER',
+    'mixer1_temp': 'REAL',
+    'mixer1_target': 'REAL',
+    'mixer1_pump': 'INTEGER',
+    'mixer1_valve': 'REAL',
 }
 
 _INSERT_MEASUREMENT_SQL = (
@@ -613,6 +629,36 @@ class Database:
                 return True
             except sqlite3.Error as e:
                 logger.error("Blad zapisu historii zmian kotla: %s", e)
+                return False
+
+    def has_recent_boiler_change(
+        self,
+        *,
+        target_type: str,
+        param_index: int,
+        new_value: str,
+        since: float,
+    ) -> bool:
+        """Czy aplikacja zapisala niedawno (od `since`) dana wartosc parametru.
+
+        Uwzglednia tez zapisy bez potwierdzenia (timeout/blad polaczenia) - sterownik
+        mogl je zastosowac mimo utraty ACK.
+        """
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT 1 FROM boiler_setting_changes
+                    WHERE target_type = ? AND param_index = ? AND new_value = ?
+                      AND status IN ('ok', 'timeout', 'connection_error')
+                      AND source != 'panel' AND timestamp >= ?
+                    LIMIT 1
+                    """,
+                    (target_type, param_index, new_value, since),
+                ).fetchone()
+                return row is not None
+            except sqlite3.Error as e:
+                logger.error("Blad odczytu historii zmian kotla: %s", e)
                 return False
 
     def get_boiler_setting_changes(self, limit: int = 100) -> list[dict[str, Any]]:

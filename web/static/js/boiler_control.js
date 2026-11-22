@@ -481,7 +481,9 @@ async function loadBoilerControlHistory() {
         }
 
         for (const row of json.data) {
-            const target = `${row.target_type || '--'}${row.target_index !== null && row.target_index !== undefined ? `:${row.target_index}` : ''}`;
+            const targetIndex = row.target_index !== null && row.target_index !== undefined ? `:${row.target_index}` : '';
+            const sourceLabel = row.source === 'panel' ? ' · zmiana na panelu' : '';
+            const target = `${row.target_type || '--'}${targetIndex}${sourceLabel}`;
             const change = `${row.old_value ?? '--'} → ${row.new_value ?? '--'}`;
             const tr = document.createElement('tr');
 

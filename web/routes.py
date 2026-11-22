@@ -23,7 +23,7 @@ from zoneinfo import available_timezones
 from flask import Blueprint, jsonify, render_template, request, Response, send_file
 
 from logger import read_log_lines, get_log_file_path
-from econet.decoder import FUEL_STREAM_MAX, MODE_NAMES
+from econet.decoder import FUEL_STREAM_MAX, MODE_NAMES, OUTPUT_BITS, OUTPUT_LABELS
 from econet.boiler_control import (
     FUEL_CALORIFIC_VALUE_INDEX,
     PARAMETERS,
@@ -105,10 +105,27 @@ PARAMETERS_METADATA = [
     {'key': 'boiler_power_kw',   'label': 'Moc kotła (kW, szacowana przez sterownik)', 'unit': 'kW', 'group': 'Moc i paliwo'},
     {'key': 'fuel_level',        'label': 'Poziom paliwa',                       'unit': '%',   'group': 'Moc i paliwo'},
     {'key': 'fuel_stream',       'label': 'Strumień paliwa',                     'unit': 'kg/h','group': 'Moc i paliwo'},
-    # ----- Pompy i aktory -----
-    {'key': 'pump_co',           'label': 'Pompa CO',                            'unit': 'bool','group': 'Pompy i aktory'},
-    {'key': 'pump_cwu',          'label': 'Pompa CWU',                           'unit': 'bool','group': 'Pompy i aktory'},
-    {'key': 'pump_circulation',  'label': 'Pompa cyrkulacji',                    'unit': 'bool','group': 'Pompy i aktory'},
+    # ----- Pompy i aktory (wszystkie wyjscia z ramki 0x35) -----
+    *({'key': name, 'label': OUTPUT_LABELS[name], 'unit': 'bool', 'group': 'Pompy i aktory'}
+      for name in OUTPUT_BITS),
+    {'key': 'outputs_raw',       'label': 'Słowo wyjść (surowe)',                'unit': None,   'group': 'Pompy i aktory'},
+    {'key': 'output_flags_raw',  'label': 'Skonfigurowane wyjścia (surowe)',     'unit': None,   'group': 'Pompy i aktory'},
+    # ----- Obiegi i termostat -----
+    {'key': 'heating_status',    'label': 'Status obiegu CO',                    'unit': None,   'group': 'Obiegi i termostat'},
+    {'key': 'water_heater_status', 'label': 'Status obiegu CWU',                 'unit': None,   'group': 'Obiegi i termostat'},
+    {'key': 'thermostat_contact', 'label': 'Styk termostatu pokojowego',         'unit': None,   'group': 'Obiegi i termostat'},
+    {'key': 'mixer1_temp',       'label': 'Mieszacz 1 – temperatura',            'unit': '°C',  'group': 'Obiegi i termostat'},
+    {'key': 'mixer1_target',     'label': 'Mieszacz 1 – temperatura zadana',     'unit': '°C',  'group': 'Obiegi i termostat'},
+    {'key': 'mixer1_pump',       'label': 'Mieszacz 1 – pompa',                  'unit': 'bool','group': 'Obiegi i termostat'},
+    {'key': 'mixer1_valve',      'label': 'Mieszacz 1 – otwarcie zaworu',        'unit': '%',   'group': 'Obiegi i termostat'},
+    # ----- Alarmy i lambda -----
+    {'key': 'pending_alerts',    'label': 'Aktywne alarmy (kody)',               'unit': None,   'group': 'Alarmy i diagnostyka'},
+    {'key': 'pending_alerts_count', 'label': 'Liczba aktywnych alarmów',         'unit': None,   'group': 'Alarmy i diagnostyka'},
+    {'key': 'transmission',      'label': 'Transmisja (surowe)',                 'unit': None,   'group': 'Alarmy i diagnostyka'},
+    {'key': 'lambda_state_name', 'label': 'Sonda lambda – stan',                 'unit': None,   'group': 'Alarmy i diagnostyka'},
+    {'key': 'lambda_target',     'label': 'Sonda lambda – tlen zadany',          'unit': '%',   'group': 'Alarmy i diagnostyka'},
+    {'key': 'lambda_level',      'label': 'Sonda lambda – poziom tlenu',         'unit': '%',   'group': 'Alarmy i diagnostyka'},
+    {'key': 'frame_versions',    'label': 'Wersje ramek sterownika',             'unit': None,   'group': 'Alarmy i diagnostyka'},
     # ----- Statystyki -----
     {'key': 'fuel_burned_kg',    'label': 'Spalone paliwo',                      'unit': 'kg',  'group': 'Statystyki'},
     {'key': 'ignitions',         'label': 'Liczba rozpaleń',                     'unit': None,   'group': 'Statystyki'},
@@ -531,6 +548,15 @@ def _get_ecomax_limits_cached(force_refresh: bool = False) -> dict:
             _boiler_limits_cache['parameters'] = dict(parameters)
 
     return dict(parameters)
+
+
+def update_boiler_limits_cache(parameters: dict) -> None:
+    """Zaktualizuj cache parametrow sterownika (np. po zmianie wersji ramki 0x38)."""
+    if not parameters:
+        return
+    with _boiler_limits_cache_lock:
+        _boiler_limits_cache['cached_at'] = time.time()
+        _boiler_limits_cache['parameters'] = dict(parameters)
 
 
 def _resolve_boiler_write_request(item_payload: dict, *, use_limits_cache: bool = True):
@@ -1976,6 +2002,8 @@ def export_csv():
         'temp_feeder', 'temp_external', 'temp_co_set', 'temp_cwu_set',
         'boiler_power', 'boiler_power_kw', 'fan_power', 'fuel_stream',
         'fuel_level', 'mode_name', 'pump_co', 'pump_cwu', 'pump_circulation',
+        'fan_on', 'feeder_on', 'lighter_on', 'alarm_output', 'thermostat_contact',
+        'mixer1_temp', 'mixer1_target', 'mixer1_pump', 'mixer1_valve',
     ]
 
     buf = io.StringIO()
@@ -2691,6 +2719,16 @@ def ha_sensor():
             'pump_co':       bool(d.get('pump_co')),
             'pump_cwu':      bool(d.get('pump_cwu')),
             'pump_circulation': bool(d.get('pump_circulation')),
+            'fan_on':        bool(d.get('fan_on')),
+            'feeder_on':     bool(d.get('feeder_on')),
+            'lighter_on':    bool(d.get('lighter_on')),
+            'alarm_output':  bool(d.get('alarm_output')),
+            'thermostat_contact': d.get('thermostat_contact'),
+            'mixer1_temp':   d.get('mixer1_temp'),
+            'mixer1_target': d.get('mixer1_target'),
+            'mixer1_pump':   d.get('mixer1_pump'),
+            'mixer1_valve':  d.get('mixer1_valve'),
+            'pending_alerts': d.get('pending_alerts'),
             'mode':          d.get('mode'),
             'mode_name':     d.get('mode_name'),
             'timestamp':     d.get('timestamp'),
@@ -2736,6 +2774,16 @@ def prometheus_metrics():
     metric('pump_co',        int(bool(d.get('pump_co'))),    'Pompa CO (0/1)')
     metric('pump_cwu',       int(bool(d.get('pump_cwu'))),   'Pompa CWU (0/1)')
     metric('pump_circulation',int(bool(d.get('pump_circulation'))),'Pompa cyrkulacji (0/1)')
+    metric('fan_on',         int(bool(d.get('fan_on'))),     'Wentylator (0/1)')
+    metric('feeder_on',      int(bool(d.get('feeder_on'))),  'Podajnik (0/1)')
+    metric('lighter_on',     int(bool(d.get('lighter_on'))), 'Zapalarka (0/1)')
+    metric('alarm_output',   int(bool(d.get('alarm_output'))), 'Wyjscie alarmowe (0/1)')
+    metric('pending_alerts', d.get('pending_alerts_count'),  'Liczba aktywnych alarmow sterownika')
+    metric('mixer1_temp',    d.get('mixer1_temp'),    'Mieszacz 1 - temperatura (C)')
+    metric('mixer1_target',  d.get('mixer1_target'),  'Mieszacz 1 - temperatura zadana (C)')
+    metric('mixer1_valve',   d.get('mixer1_valve'),   'Mieszacz 1 - otwarcie zaworu (%)')
+    if d.get('mixer1_pump') is not None:
+        metric('mixer1_pump', int(bool(d.get('mixer1_pump'))), 'Mieszacz 1 - pompa (0/1)')
     metric('mode',           d.get('mode'),           'Tryb pracy kotla')
 
     return Response('\n'.join(lines) + '\n', mimetype='text/plain; version=0.0.4')

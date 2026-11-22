@@ -20,13 +20,14 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from alerts import AlertEngine
+from controller_sync import ControllerSync
 from database import Database
 from derived_data import apply_config_overrides
 from econet.connection import EW11AConnection
 from econet.decoder import BoilerData
 from logger import setup_file_logging, cleanup_old_logs
 from web.app import create_app, socketio, emit_data, emit_alert
-from web.routes import init_routes
+from web.routes import init_routes, update_boiler_limits_cache
 
 # Stale startowe (niezalezne od bazy danych)
 _FLASK_HOST        = "0.0.0.0"
@@ -258,7 +259,10 @@ def main():
     app = create_app()
     init_routes(connection, db)
 
+    controller_sync = ControllerSync(connection, db, on_parameters=update_boiler_limits_cache)
+
     # Start polaczenia/symulatora
+    controller_sync.start()
     connection.start()
     alert_engine.start()
 
@@ -281,6 +285,7 @@ def main():
     def _shutdown(signum, frame):
         logger.info("Otrzymano sygnal %d - zamykanie...", signum)
         _stop_event.set()
+        controller_sync.stop()
         alert_engine.stop()
         connection.stop()
         db.close()
