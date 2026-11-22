@@ -19,6 +19,7 @@ ALERT_LABELS = {
     'temp_co_low':   'Niska temp. CO',
     'fuel_low':      'Niski poziom paliwa',
     'no_connection': 'Brak polaczenia z EW11A',
+    'controller_alarm': 'Alarm sterownika',
 }
 
 
@@ -68,8 +69,11 @@ class AlertEngine:
                         f'Temperatura CO {boiler_data.temp_co:.1f}\u00b0C '
                         f'ponizej progu {limit:.0f}\u00b0C')
 
-        # Niski poziom paliwa
-        if boiler_data.fuel_level is not None:
+        # Niski poziom paliwa (brak wartosci, np. poziom nieustawiony w sterowniku,
+        # wygasza ewentualny aktywny alert).
+        if boiler_data.fuel_level is None:
+            self._check('fuel_low', False, '')
+        else:
             try:
                 limit = float(cfg.get('alert_fuel_level_min', '15'))
             except (ValueError, TypeError):
@@ -88,6 +92,10 @@ class AlertEngine:
                 self._fire(alert_type, message)
             elif not condition and was_active:
                 self._active[alert_type] = False
+
+    def fire(self, alert_type: str, message: str) -> None:
+        """Zglos alert z zewnatrz silnika (np. nowy alarm odczytany ze sterownika)."""
+        self._fire(alert_type, message)
 
     def _fire(self, alert_type: str, message: str) -> None:
         alert = {

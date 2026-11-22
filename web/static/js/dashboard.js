@@ -321,9 +321,20 @@ function updateDashboard(data) {
     if (modeTimeEl) modeTimeEl.textContent = controllerDateTime.time;
     if (modeDateEl) modeDateEl.textContent = controllerDateTime.date;
 
+    const pendingEl = document.getElementById('pending-alarms');
+    const pendingNames = Array.isArray(data.pending_alerts_names) ? data.pending_alerts_names : [];
+    if (pendingEl) {
+        pendingEl.style.display = pendingNames.length ? '' : 'none';
+        const link = pendingEl.querySelector('a');
+        if (link) link.textContent = pendingNames.length ? `Aktywny alarm: ${pendingNames.join(', ')}` : '';
+    }
+
     modeCard.classList.remove('alarm', 'off');
     if (data.mode === 8) modeCard.classList.add('alarm');
     else if (data.mode === 0) modeCard.classList.add('off');
+    const modeColor = (window.MODE_COLORS || {})[data.mode];
+    if (modeColor) modeCard.style.setProperty('--mode-color', modeColor);
+    else modeCard.style.removeProperty('--mode-color');
 
     // Temperatury
     setVal('val-temp-co', formatTemp(data.temp_co));
@@ -340,12 +351,23 @@ function updateDashboard(data) {
     setVal('val-temp-cwu-set', formatTemp(data.temp_cwu_set));
 
     // Parametry operacyjne
-    setVal('val-boiler-power', formatVal(data.boiler_power));
-    setVal('val-boiler-power-kw', formatVal(data.boiler_power_kw));
+    updateBoilerPowerTile(data);
     setVal('val-fan-power', formatVal(data.fan_power));
     setVal('val-flame', formatVal(data.flame || data.temp_optical));
     setVal('val-fuel-stream', formatVal(data.fuel_stream));
-    setVal('val-fuel-level', formatVal(data.fuel_level));
+    if (data.fuel_level_not_set) {
+        setVal('val-fuel-level', 'nie ustawiono');
+        setVal('val-fuel-level-unit', '');
+    } else {
+        setVal('val-fuel-level', formatVal(data.fuel_level));
+        setVal('val-fuel-level-unit', '%');
+    }
+
+    // Wskaźniki: temperatura względem zadanej, procent pracy
+    setGauge('gauge-temp-co', data.temp_co, data.temp_co_set, GAUGE_MAX_CO);
+    setGauge('gauge-temp-cwu', data.temp_cwu, data.temp_cwu_set, GAUGE_MAX_CWU);
+    setMeter('meter-boiler-power', data.boiler_power);
+    setMeter('meter-fan-power', data.fan_power);
 
     // Sprawność obiegu
     updateEfficiency(data);
@@ -354,6 +376,12 @@ function updateDashboard(data) {
     setPump('pump-co', data.pump_co);
     setPump('pump-cwu', data.pump_cwu);
     setPump('pump-circ', data.pump_circulation);
+    setPump('out-fan', data.fan_on);
+    setPump('out-feeder', data.feeder_on);
+    setPump('out-lighter', data.lighter_on);
+
+    // Mieszacze
+    updateMixers(data.mixer_data);
 
     // Statystyki PoC
     if (data.fuel_burned_kg !== null && data.fuel_burned_kg !== undefined) {
@@ -363,6 +391,114 @@ function updateDashboard(data) {
         setVal('val-work-100', data.work_time_100 || '--');
         setVal('val-work-50', data.work_time_50 || '--');
     }
+}
+
+// Kafle mieszaczy: tylko mieszacze z odczytem temperatury (podłączone).
+function updateMixers(mixers) {
+    const section = document.getElementById('mixers-section');
+    if (!section) return;
+    const connected = (Array.isArray(mixers) ? mixers : [])
+        .map((mixer, index) => ({ ...mixer, index }))
+        .filter((mixer) => mixer.current_temp !== null && mixer.current_temp !== undefined);
+
+    section.style.display = connected.length ? '' : 'none';
+    const seen = new Set();
+    for (const mixer of connected) {
+        const tileId = `tile-mixer-${mixer.index}`;
+        seen.add(tileId);
+        let tile = document.getElementById(tileId);
+        if (!tile) {
+            tile = document.createElement('div');
+            tile.className = 'tile';
+            tile.id = tileId;
+            tile.innerHTML = `
+                <div class="tile-head"><iconify-icon icon="mdi:valve" class="tile-icon"></iconify-icon><span class="tile-label"></span></div>
+                <div class="tile-value"><span class="mixer-temp">--</span><small>°C</small></div>
+                <div class="tile-set">Zadana <strong><span class="mixer-target">--</span> °C</strong></div>
+                <div class="meter" aria-hidden="true"><div class="meter-fill mixer-valve-meter"></div></div>
+                <div class="tile-set">Zawór <strong><span class="mixer-valve">--</span>%</strong> <span class="mixer-valve-dir"></span></div>
+                <div class="pump-indicator mixer-pump"><span class="pump-dot off"></span><span>Pompa mieszacza</span></div>`;
+            tile.querySelector('.tile-label').textContent = `Mieszacz ${mixer.index + 1}`;
+            section.appendChild(tile);
+        }
+        tile.querySelector('.mixer-temp').textContent = formatTemp(mixer.current_temp);
+        tile.querySelector('.mixer-target').textContent = mixer.target_temp ?? '--';
+        const valve = mixer.valve_position;
+        tile.querySelector('.mixer-valve').textContent = valve ?? '--';
+        tile.querySelector('.mixer-valve-meter').style.width = (valve === null || valve === undefined) ? '0%' : `${Math.max(0, Math.min(100, valve))}%`;
+        tile.querySelector('.mixer-valve-dir').textContent = mixer.valve_opening ? '▲ otwiera' : (mixer.valve_closing ? '▼ zamyka' : '');
+        const dot = tile.querySelector('.mixer-pump .pump-dot');
+        dot.classList.toggle('on', !!mixer.pump);
+        dot.classList.toggle('off', !mixer.pump);
+    }
+    for (const tile of Array.from(section.children)) {
+        if (!seen.has(tile.id)) tile.remove();
+    }
+}
+
+// Kafel mocy: % (ze sterownika lub wyliczony z mocy nominalnej), a gdy % jest
+// niedostępny - sama moc w kW. Moc w kW jest szacowana przez sterownik.
+function updateBoilerPowerTile(data) {
+    const hasPercent = data.boiler_power !== null && data.boiler_power !== undefined;
+    const detailEl = document.getElementById('boiler-power-detail');
+    if (hasPercent) {
+        setVal('val-boiler-power', formatVal(data.boiler_power));
+        setVal('val-boiler-power-unit', '%');
+        setVal('val-boiler-power-kw', formatVal(data.boiler_power_kw));
+        if (detailEl) detailEl.style.display = '';
+    } else {
+        setVal('val-boiler-power', formatVal(data.boiler_power_kw));
+        setVal('val-boiler-power-unit', 'kW');
+        if (detailEl) detailEl.style.display = 'none';
+    }
+    const tile = document.getElementById('tile-power');
+    if (tile) {
+        tile.title = data.boiler_power_source === 'calculated'
+            ? 'Obciążenie % wyliczone z mocy w kW i mocy nominalnej kotła z ustawień'
+            : '';
+    }
+}
+
+async function loadFuelInfo() {
+    try {
+        const resp = await fetch('/api/fuel-info');
+        const json = await resp.json();
+        const value = json?.data?.calorific_value_kwh_kg;
+        const el = document.getElementById('boiler-power-calorific');
+        if (el && value !== null && value !== undefined) {
+            setVal('val-calorific', Number(value).toLocaleString('pl-PL', { maximumFractionDigits: 1 }));
+            el.style.display = '';
+        }
+    } catch (e) {
+        // Informacja pomocnicza - brak nie blokuje dashboardu.
+    }
+}
+
+const GAUGE_MAX_CO = 90;
+const GAUGE_MAX_CWU = 70;
+
+function _pct(value, max) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return null;
+    return Math.max(0, Math.min(100, (Number(value) / max) * 100));
+}
+
+function setGauge(id, value, target, max) {
+    const fill = document.getElementById(id);
+    const marker = document.getElementById(id + '-target');
+    const valuePct = _pct(value, max);
+    const targetPct = _pct(target, max);
+    if (fill) fill.style.width = valuePct === null ? '0%' : valuePct + '%';
+    if (marker) {
+        marker.style.display = targetPct === null ? 'none' : '';
+        if (targetPct !== null) marker.style.left = targetPct + '%';
+    }
+}
+
+function setMeter(id, value) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const pct = _pct(value, 100);
+    el.style.width = pct === null ? '0%' : pct + '%';
 }
 
 function setVal(id, value) {
@@ -385,6 +521,21 @@ function setTempStatsText(id, text) {
     if (el) el.textContent = text;
 }
 
+function setTempStats(id, min, max, avg) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = '';
+    el.title = 'Ostatnie 24 h';
+    [['min', min], ['max', max], ['śr.', avg]].forEach(([label, value]) => {
+        const item = document.createElement('span');
+        item.append(label + ' ');
+        const strong = document.createElement('b');
+        strong.textContent = formatTempStat(value);
+        item.appendChild(strong);
+        el.appendChild(item);
+    });
+}
+
 function formatTempStat(val) {
     if (!Number.isFinite(val)) return '--';
     return Number(val).toFixed(1);
@@ -392,7 +543,7 @@ function formatTempStat(val) {
 
 function setNoTempStats() {
     TEMP_STATS_DEF.forEach(({ id }) => {
-        setTempStatsText(id, 'min: -- / max: -- / śr: -- °C');
+        setTempStats(id, NaN, NaN, NaN);
     });
 }
 
@@ -413,14 +564,11 @@ async function loadTempStats24h() {
             const stats = statsData[key];
 
             if (!stats || !Number.isFinite(stats.min) || !Number.isFinite(stats.max) || !Number.isFinite(stats.avg)) {
-                setTempStatsText(id, 'min: -- / max: -- / śr: -- °C');
+                setTempStats(id, NaN, NaN, NaN);
                 return;
             }
 
-            setTempStatsText(
-                id,
-                `min: ${formatTempStat(stats.min)} / max: ${formatTempStat(stats.max)} / śr: ${formatTempStat(stats.avg)} °C`
-            );
+            setTempStats(id, stats.min, stats.max, stats.avg);
         });
     } catch (e) {
         console.warn('loadTempStats24h: błąd pobierania statystyk:', e);
@@ -448,29 +596,55 @@ function updateConnectionStatus(connected) {
 }
 
 // ---- Wykres ----
+function cssVar(name, fallback) {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name);
+    return v && v.trim() ? v.trim() : fallback;
+}
+
 const DATASETS_DEF = [
-    { label: 'Temp. CO',      color: '#f0a500', key: 'temp_co',      yAxis: 'yTemp' },
-    { label: 'Temp. CWU',     color: '#3498db', key: 'temp_cwu',     yAxis: 'yTemp' },
-    { label: 'Temp. powrotu', color: '#2ecc71', key: 'temp_back',    yAxis: 'yTemp' },
-    { label: 'Temp. spalin',  color: '#e94560', key: 'temp_flue_gas',yAxis: 'yTemp' },
-    { label: 'Moc kotła (%)', color: '#9b59b6', key: 'boiler_power', yAxis: 'yPct'  },
-    { label: 'Wentylator (%)',color: '#00bcd4', key: 'fan_power',    yAxis: 'yPct'  },
-    { label: 'Paliwo (kg/h)', color: '#8e44ad', key: 'fuel_stream',  yAxis: 'yFuel' },
+    { label: 'Zasilanie CO',  color: '#d9480f', cssColor: '--series-1', key: 'temp_co',      yAxis: 'yTemp' },
+    { label: 'CWU',           color: '#1c7ed6', cssColor: '--series-2', key: 'temp_cwu',     yAxis: 'yTemp' },
+    { label: 'Powrót',        color: '#0ca678', cssColor: '--series-3', key: 'temp_back',    yAxis: 'yTemp' },
+    { label: 'Spaliny',       color: '#868e96', cssColor: '--series-4', key: 'temp_flue_gas',yAxis: 'yTemp' },
+    { label: 'Moc kotła (%)', color: '#f59f00', cssColor: '--series-5', key: 'boiler_power', yAxis: 'yPct'  },
+    { label: 'Wentylator (%)',color: '#7048e8', cssColor: '--series-6', key: 'fan_power',    yAxis: 'yPct'  },
+    { label: 'Paliwo (kg/h)', color: '#a61e4d', cssColor: '--series-7', key: 'fuel_stream',  yAxis: 'yFuel' },
 ];
 
 function chartGridColor() {
-    return document.documentElement.getAttribute('data-theme') === 'dark'
-        ? 'rgba(255,255,255,0.12)'
-        : 'rgba(0,0,0,0.09)';
+    return cssVar('--chart-grid', 'rgba(0,0,0,0.08)');
+}
+
+function chartTickColor() {
+    return cssVar('--text-secondary', '#5e6b74');
+}
+
+function seriesColor(def) {
+    return cssVar(def.cssColor, def.color);
+}
+
+function withAlpha(color, alpha) {
+    const hex = String(color).trim();
+    if (/^#[0-9a-f]{6}$/i.test(hex)) {
+        const n = parseInt(hex.slice(1), 16);
+        return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+    }
+    return color;
 }
 
 function updateChartGridColors() {
     if (!tempChart) return;
-    const color = chartGridColor();
-    ['x', 'yTemp'].forEach(id => {
-        if (tempChart.options.scales[id]) {
-            tempChart.options.scales[id].grid.color = color;
-        }
+    const grid = chartGridColor();
+    const tick = chartTickColor();
+    Object.values(tempChart.options.scales).forEach(scale => {
+        if (scale.grid && scale.grid.drawOnChartArea !== false) scale.grid.color = grid;
+        if (scale.ticks) scale.ticks.color = tick;
+        if (scale.title) scale.title.color = tick;
+    });
+    tempChart.data.datasets.forEach((ds, i) => {
+        const c = seriesColor(DATASETS_DEF[i]);
+        ds.borderColor = c;
+        ds.backgroundColor = withAlpha(c, 0.08);
     });
     tempChart.update('none');
 }
@@ -480,17 +654,22 @@ new MutationObserver(updateChartGridColors)
 
 function initChart() {
     const ctx = document.getElementById('temp-chart').getContext('2d');
+    const tick = chartTickColor();
+    const grid = chartGridColor();
+    const font = { family: "'IBM Plex Sans', system-ui, sans-serif", size: 12 };
     tempChart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: [],
             datasets: DATASETS_DEF.map(d => ({
                 label: d.label,
-                borderColor: d.color,
-                backgroundColor: d.color.replace(')', ',0.1)').replace('rgb', 'rgba'),
+                borderColor: seriesColor(d),
+                backgroundColor: withAlpha(seriesColor(d), 0.08),
+                borderWidth: 2,
                 data: [],
                 tension: 0.3,
                 pointRadius: 0,
+                pointHoverRadius: 4,
                 yAxisID: d.yAxis,
                 hidden: ['yPct','yFuel'].includes(d.yAxis),
             })),
@@ -500,8 +679,15 @@ function initChart() {
             maintainAspectRatio: false,
             interaction: { intersect: false, mode: 'index' },
             plugins: {
-                legend: { labels: { color: '#a0a0a0', font: { size: 12 } } },
-                tooltip: { backgroundColor: 'rgba(0,0,0,0.8)' },
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: 'rgba(23,32,38,0.92)',
+                    titleFont: font,
+                    bodyFont: font,
+                    padding: 10,
+                    cornerRadius: 6,
+                    boxPadding: 4,
+                },
                 zoom: {
                     zoom: {
                         wheel: { enabled: true },
@@ -513,25 +699,31 @@ function initChart() {
             },
             scales: {
                 x: {
-                    ticks: { color: '#666', maxTicksLimit: 12 },
-                    grid: { color: chartGridColor() },
+                    ticks: { color: tick, maxTicksLimit: 10, font },
+                    grid: { color: grid, drawTicks: false },
+                    border: { display: false },
                 },
                 yTemp: {
                     type: 'linear', position: 'left',
-                    ticks: { color: '#666' },
-                    grid: { color: chartGridColor() },
-                    title: { display: true, text: 'Temperatura (°C)', color: '#666' },
+                    ticks: { color: tick, font, padding: 8 },
+                    grid: { color: grid, drawTicks: false },
+                    border: { display: false },
+                    title: { display: true, text: '°C', color: tick, font },
                 },
                 yPct: {
                     type: 'linear', position: 'right', display: false,
                     min: 0, max: 100,
+                    ticks: { color: tick, font },
                     grid: { drawOnChartArea: false },
-                    title: { display: true, text: '(%)', color: '#666' },
+                    border: { display: false },
+                    title: { display: true, text: '%', color: tick, font },
                 },
                 yFuel: {
                     type: 'linear', position: 'right', display: false,
+                    ticks: { color: tick, font },
                     grid: { drawOnChartArea: false },
-                    title: { display: true, text: 'kg/h', color: '#666' },
+                    border: { display: false },
+                    title: { display: true, text: 'kg/h', color: tick, font },
                 },
             },
         },
@@ -843,7 +1035,7 @@ async function pollData() {
         if (json.connection) {
             setVal('footer-frames', json.connection.frames_received || 0);
             const bytes = json.connection.bytes_received || 0;
-            setVal('footer-bytes', bytes > 1024 ? (bytes / 1024).toFixed(1) + ' KB' : bytes);
+            setVal('footer-bytes', bytes > 1024 ? (bytes / 1024).toFixed(1) + ' KB' : bytes + ' B');
             updateConnectionStatus(json.connection.connected);
         }
     } catch (e) {
@@ -1124,6 +1316,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initAlerts();
     loadCosts();
     loadTempStats24h();
+    loadFuelInfo();
     _intervals.push(setInterval(loadCosts, 300000));
     _intervals.push(setInterval(loadTempStats24h, TEMP_STATS_REFRESH_MS));
 

@@ -23,11 +23,36 @@ from zoneinfo import available_timezones
 from flask import Blueprint, jsonify, render_template, request, Response, send_file
 
 from logger import read_log_lines, get_log_file_path
-from econet.decoder import FUEL_STREAM_MAX
-from econet.boiler_control import PARAMETERS, PARAMETERS_BY_KEY, format_parameter_value
+from econet.decoder import FUEL_STREAM_MAX, MODE_NAMES, OUTPUT_BITS, OUTPUT_LABELS
+from econet.boiler_control import (
+    FUEL_CALORIFIC_VALUE_INDEX,
+    PARAMETERS,
+    PARAMETERS_BY_KEY,
+    format_parameter_value,
+)
+from derived_data import apply_config_overrides, is_fuel_level_not_set, parse_nominal_power
+from econet.alarms import ALARM_KINDLING_FAILURE, alarm_name
+from analytics import (
+    METRIC_ENERGY, METRIC_FAN, METRIC_FEEDER, METRIC_FUEL, METRIC_KINDLINGS, METRIC_LIGHTER,
+    METRIC_LIGHTER_STARTS, METRIC_OBSERVED, METRIC_WORK_CYCLES, MODE_METRIC_PREFIX,
+)
+from econet.ecomax_parameters import ECOMAX_P_PARAMETERS
+from econet.mixer_parameters import MIXER_PARAMETERS, MIXER_PARAMETERS_BY_KEY, get_mixer_parameter_info
+from controller_sync import CONFIG_ALARMS_IMPORTED, CONFIG_REGDATA_SCHEMA, TASK_ALARMS, TASK_REGDATA_SCHEMA
+from econet import regdata as regdata_module
+
+# Klucze konfiguracji uzywane wewnetrznie (nie sa ustawieniami uzytkownika - pomijane w /api/config).
+CONFIG_REGDATA_LABELS = 'regdata_labels'
+_INTERNAL_CONFIG_KEYS = frozenset({CONFIG_REGDATA_SCHEMA, CONFIG_REGDATA_LABELS, CONFIG_ALARMS_IMPORTED})
+_REGDATA_LABEL_MAX_LEN = 80
+_regdata_labels_lock = threading.Lock()
+_JS_SAFE_INT = 2 ** 53 - 1
 from sensors import DASHBOARD_TILE_DEFINITIONS, DASHBOARD_TILE_KEYS
 
 bp = Blueprint('main', __name__)
+
+# Czas startu procesu - podstawa dla `uptime` w /api/status.
+_APP_STARTED_AT = time.time()
 
 try:
     from eventlet.green.urllib import request as green_urllib_request
@@ -82,6 +107,10 @@ PARAMETERS_METADATA = [
     {'key': 'temp_fireplace',    'label': 'Temperatura kominka',                 'unit': '°C',  'group': 'Temperatury'},
     {'key': 'flame',             'label': 'Sygnał optyczny płomienia',           'unit': '°C',  'group': 'Temperatury'},
     {'key': 'total_gain',        'label': 'Zysk całkowity',                      'unit': None,   'group': 'Temperatury'},
+    {'key': 'temp_hydraulic_coupler', 'label': 'Temperatura sprzęgła hydraulicznego', 'unit': '°C', 'group': 'Temperatury'},
+    {'key': 'temp_exchanger',    'label': 'Temperatura wymiennika',              'unit': '°C',  'group': 'Temperatury'},
+    {'key': 'temp_air_in',       'label': 'Temperatura powietrza (wlot)',        'unit': '°C',  'group': 'Temperatury'},
+    {'key': 'temp_air_out',      'label': 'Temperatura powietrza (wylot)',       'unit': '°C',  'group': 'Temperatury'},
     # ----- Temperatury zadane -----
     {'key': 'temp_co_set',       'label': 'Temperatura zadana CO',               'unit': '°C',  'group': 'Temperatury zadane'},
     {'key': 'temp_cwu_set',      'label': 'Temperatura zadana CWU',              'unit': '°C',  'group': 'Temperatury zadane'},
@@ -89,13 +118,30 @@ PARAMETERS_METADATA = [
     {'key': 'fan_power',         'label': 'Moc wentylatora',                     'unit': '%',   'group': 'Moc i paliwo'},
     {'key': 'blower',            'label': 'Moc dmuchawy (raw)',                  'unit': '%',   'group': 'Moc i paliwo'},
     {'key': 'boiler_power',      'label': 'Moc kotła (%)',                       'unit': '%',   'group': 'Moc i paliwo'},
-    {'key': 'boiler_power_kw',   'label': 'Moc kotła (kW)',                      'unit': 'kW',  'group': 'Moc i paliwo'},
+    {'key': 'boiler_power_kw',   'label': 'Moc kotła (kW, szacowana przez sterownik)', 'unit': 'kW', 'group': 'Moc i paliwo'},
     {'key': 'fuel_level',        'label': 'Poziom paliwa',                       'unit': '%',   'group': 'Moc i paliwo'},
     {'key': 'fuel_stream',       'label': 'Strumień paliwa',                     'unit': 'kg/h','group': 'Moc i paliwo'},
-    # ----- Pompy i aktory -----
-    {'key': 'pump_co',           'label': 'Pompa CO',                            'unit': 'bool','group': 'Pompy i aktory'},
-    {'key': 'pump_cwu',          'label': 'Pompa CWU',                           'unit': 'bool','group': 'Pompy i aktory'},
-    {'key': 'pump_circulation',  'label': 'Pompa cyrkulacji',                    'unit': 'bool','group': 'Pompy i aktory'},
+    # ----- Pompy i aktory (wszystkie wyjscia z ramki 0x35) -----
+    *({'key': name, 'label': OUTPUT_LABELS[name], 'unit': 'bool', 'group': 'Pompy i aktory'}
+      for name in OUTPUT_BITS),
+    {'key': 'outputs_raw',       'label': 'Słowo wyjść (surowe)',                'unit': None,   'group': 'Pompy i aktory'},
+    {'key': 'output_flags_raw',  'label': 'Skonfigurowane wyjścia (surowe)',     'unit': None,   'group': 'Pompy i aktory'},
+    # ----- Obiegi i termostat -----
+    {'key': 'heating_status',    'label': 'Status obiegu CO',                    'unit': None,   'group': 'Obiegi i termostat'},
+    {'key': 'water_heater_status', 'label': 'Status obiegu CWU',                 'unit': None,   'group': 'Obiegi i termostat'},
+    {'key': 'thermostat_contact', 'label': 'Styk termostatu pokojowego',         'unit': None,   'group': 'Obiegi i termostat'},
+    {'key': 'mixer1_temp',       'label': 'Mieszacz 1 – temperatura',            'unit': '°C',  'group': 'Obiegi i termostat'},
+    {'key': 'mixer1_target',     'label': 'Mieszacz 1 – temperatura zadana',     'unit': '°C',  'group': 'Obiegi i termostat'},
+    {'key': 'mixer1_pump',       'label': 'Mieszacz 1 – pompa',                  'unit': 'bool','group': 'Obiegi i termostat'},
+    {'key': 'mixer1_valve',      'label': 'Mieszacz 1 – otwarcie zaworu',        'unit': '%',   'group': 'Obiegi i termostat'},
+    # ----- Alarmy i lambda -----
+    {'key': 'pending_alerts',    'label': 'Aktywne alarmy (kody)',               'unit': None,   'group': 'Alarmy i diagnostyka'},
+    {'key': 'pending_alerts_count', 'label': 'Liczba aktywnych alarmów',         'unit': None,   'group': 'Alarmy i diagnostyka'},
+    {'key': 'transmission',      'label': 'Transmisja (surowe)',                 'unit': None,   'group': 'Alarmy i diagnostyka'},
+    {'key': 'lambda_state_name', 'label': 'Sonda lambda – stan',                 'unit': None,   'group': 'Alarmy i diagnostyka'},
+    {'key': 'lambda_target',     'label': 'Sonda lambda – tlen zadany',          'unit': '%',   'group': 'Alarmy i diagnostyka'},
+    {'key': 'lambda_level',      'label': 'Sonda lambda – poziom tlenu',         'unit': '%',   'group': 'Alarmy i diagnostyka'},
+    {'key': 'frame_versions',    'label': 'Wersje ramek sterownika',             'unit': None,   'group': 'Alarmy i diagnostyka'},
     # ----- Statystyki -----
     {'key': 'fuel_burned_kg',    'label': 'Spalone paliwo',                      'unit': 'kg',  'group': 'Statystyki'},
     {'key': 'ignitions',         'label': 'Liczba rozpaleń',                     'unit': None,   'group': 'Statystyki'},
@@ -138,9 +184,17 @@ def _normalize_mode_name(value):
 
 
 def _normalize_mode_name_in_row(row):
+    """Ujednolic nazwe trybu; kod trybu ma pierwszenstwo przed zapisana nazwa.
+
+    Dzieki temu wiersze zapisane w bazie przed poprawka nazw trybow
+    (np. 1 = "Zatrzymany", 6 = "Czyszczenie") pokazuja aktualne nazwy.
+    """
     if not isinstance(row, dict):
         return row
-    if 'mode_name' in row:
+    mode = row.get('mode')
+    if isinstance(mode, int) and not isinstance(mode, bool) and mode in MODE_NAMES:
+        row['mode_name'] = MODE_NAMES[mode]
+    elif 'mode_name' in row:
         row['mode_name'] = _normalize_mode_name(row.get('mode_name'))
     return row
 
@@ -370,6 +424,8 @@ def _mark_legacy_migration_failed(location_name: str, reason: str):
 _routes_lock = threading.Lock()
 _connection = None
 _database = None
+_controller_sync = None
+_operation_tracker = None
 _boiler_limits_cache_lock = threading.Lock()
 _boiler_limits_cache = {
     'cached_at': 0.0,
@@ -512,6 +568,50 @@ def _get_ecomax_limits_cached(force_refresh: bool = False) -> dict:
     return dict(parameters)
 
 
+_mixer_params_cache_lock = threading.Lock()
+_mixer_params_cache = {'cached_at': 0.0, 'mixers': {}}
+_MIXER_PARAMS_TTL_SEC = 5.0
+
+
+def _get_mixer_params_cached(force_refresh: bool = False) -> dict:
+    """Parametry mieszaczy ze sterownika (0x32/0xB2) z krotkim cache."""
+    if not (_connection and getattr(_connection, 'connected', False)
+            and hasattr(_connection, 'request_mixer_parameters')):
+        return {}
+    now = time.time()
+    with _mixer_params_cache_lock:
+        if not force_refresh and (now - _mixer_params_cache['cached_at']) <= _MIXER_PARAMS_TTL_SEC:
+            return dict(_mixer_params_cache['mixers'])
+    try:
+        mixers = _execute_blocking(_connection.request_mixer_parameters, timeout=2.0) or {}
+    except Exception:
+        mixers = {}
+    if mixers:
+        with _mixer_params_cache_lock:
+            _mixer_params_cache['cached_at'] = now
+            _mixer_params_cache['mixers'] = dict(mixers)
+    return dict(mixers)
+
+
+def _invalidate_controller_caches(target_type: str) -> None:
+    """Po udanym zapisie wymus ponowny odczyt wartosci i zakresow ze sterownika."""
+    if target_type == 'mixer':
+        with _mixer_params_cache_lock:
+            _mixer_params_cache['cached_at'] = 0.0
+    elif target_type == 'ecomax':
+        with _boiler_limits_cache_lock:
+            _boiler_limits_cache['cached_at'] = 0.0
+
+
+def update_boiler_limits_cache(parameters: dict) -> None:
+    """Zaktualizuj cache parametrow sterownika (np. po zmianie wersji ramki 0x38)."""
+    if not parameters:
+        return
+    with _boiler_limits_cache_lock:
+        _boiler_limits_cache['cached_at'] = time.time()
+        _boiler_limits_cache['parameters'] = dict(parameters)
+
+
 def _resolve_boiler_write_request(item_payload: dict, *, use_limits_cache: bool = True):
     """Ujednolicona walidacja zapisu parametru dla set-parameter i set-batch."""
     target_type = str(item_payload.get('target_type', 'ecomax') or 'ecomax').strip().lower()
@@ -530,6 +630,8 @@ def _resolve_boiler_write_request(item_payload: dict, *, use_limits_cache: bool 
     elif target_type in ('mixer', 'thermostat'):
         param = None
         index_raw = item_payload.get('index', None)
+        if index_raw is None and target_type == 'mixer' and key in MIXER_PARAMETERS_BY_KEY:
+            index_raw = MIXER_PARAMETERS_BY_KEY[key].index
         try:
             index_value = int(index_raw)
         except (TypeError, ValueError) as exc:
@@ -545,6 +647,26 @@ def _resolve_boiler_write_request(item_payload: dict, *, use_limits_cache: bool 
     min_value = param.min_value if param else 0
     max_value = param.max_value if param else 255
     old_value = None
+    display_param = param
+
+    if target_type == 'mixer':
+        display_param = get_mixer_parameter_info(index_value)
+        try:
+            mixer_index = int(target_index or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('target_index mieszacza musi być liczbą') from exc
+        mixers = _get_mixer_params_cached() if use_limits_cache else {}
+        if not mixers:
+            mixers = _get_mixer_params_cached(force_refresh=True)
+        ctrl_limits = mixers.get(mixer_index, {}).get(index_value)
+        if not ctrl_limits:
+            raise ValueError('Nie udało się odczytać zakresu parametru mieszacza ze sterownika - zapis wstrzymany')
+        if ctrl_limits:
+            if not ctrl_limits.get('available', True):
+                raise ValueError('Parametr niedostępny w tym sterowniku')
+            min_value = int(ctrl_limits['min_value'])
+            max_value = int(ctrl_limits['max_value'])
+            old_value = str(ctrl_limits.get('value'))
 
     if target_type == 'ecomax':
         controller_limits = {}
@@ -565,11 +687,18 @@ def _resolve_boiler_write_request(item_payload: dict, *, use_limits_cache: bool 
                 ctrl_limits = None
 
         if ctrl_limits:
+            if not ctrl_limits.get('available', True):
+                raise ValueError('Parametr niedostępny w tym sterowniku')
             min_value = int(ctrl_limits.get('min_value', min_value))
             max_value = int(ctrl_limits.get('max_value', max_value))
             old_value = str(ctrl_limits.get('value'))
 
     if value < min_value or value > max_value:
+        if display_param and (display_param.scale != 1 or display_param.display_offset != 0):
+            def _fmt(raw):
+                shown = display_param.to_display(raw)
+                return f'{shown:g}'.replace('.', ',') if isinstance(shown, float) else str(shown)
+            raise ValueError(f'Wartość poza zakresem {_fmt(min_value)}-{_fmt(max_value)} (surowo {min_value}-{max_value})')
         raise ValueError(f'Wartość poza zakresem {min_value}-{max_value}')
 
     return {
@@ -1095,12 +1224,14 @@ def _read_system_ntp_status() -> dict:
     return status
 
 
-def init_routes(connection, database):
-    """Ustaw referencje do polaczenia i bazy."""
-    global _connection, _database
+def init_routes(connection, database, controller_sync=None, operation_tracker=None):
+    """Ustaw referencje do polaczenia, bazy, synchronizacji ze sterownikiem i analityki."""
+    global _connection, _database, _controller_sync, _operation_tracker
     with _routes_lock:
         _connection = connection
         _database = database
+        _controller_sync = controller_sync
+        _operation_tracker = operation_tracker
 
     # Zastosuj zapisana strefe czasowa na poziomie procesu,
     # aby czas wysylany przez WebSocket byl zgodny z konfiguracja aplikacji.
@@ -1158,6 +1289,8 @@ def get_current_data():
             )
 
         _normalize_mode_name_in_row(data)
+        if _database:
+            apply_config_overrides(data, _database.get_all_config())
         return jsonify({
             'status': 'ok',
             'data': data,
@@ -1167,6 +1300,7 @@ def get_current_data():
     latest = _database.get_latest() if _database else None
     if latest:
         _normalize_mode_name_in_row(latest)
+        apply_config_overrides(latest, _database.get_all_config())
         return jsonify({
             'status': 'ok',
             'data': latest,
@@ -1260,6 +1394,8 @@ def get_boiler_control_parameters():
             'min_value': min_value,
             'max_value': max_value,
             'step': param.step,
+            'scale': param.scale,
+            'display_offset': param.display_offset,
             'value_map': param.value_map,
             'current_value': current_value,
             'current_value_text': format_parameter_value(param, current_value),
@@ -1288,6 +1424,9 @@ def get_boiler_control_capabilities():
             'supports_schedule': True,
             'supports_schedule_raw': True,
             'supports_service_profile': True,
+            'supports_mixer_parameters': True,
+            'supports_power_control': True,
+            'supports_controller_alarms': True,
         },
     })
 
@@ -1340,6 +1479,9 @@ def get_boiler_control_device_info():
         'product_id': uid_info.get('product_id'),
         'model': uid_info.get('model'),
         'uid': uid_info.get('uid'),
+        'uid_hex': uid_info.get('uid_hex'),
+        'mode': getattr(last_data, 'mode', None) if last_data else None,
+        'mode_name': MODE_NAMES.get(getattr(last_data, 'mode', None)) if last_data else None,
         'mixers_available': mixers_available,
         'mixers_connected': mixers_connected,
         'thermostats_available': thermostats_available,
@@ -1352,6 +1494,145 @@ def get_boiler_control_device_info():
         result['uid_error'] = uid_error
 
     return jsonify({'status': 'ok', 'data': result})
+
+
+def _param_row(info, entry: Optional[dict]) -> dict:
+    """Wiersz parametru (ecoMAX lub mieszacz) z wartoscia surowa i wyswietlana."""
+    entry = entry or {}
+    available = bool(entry.get('available'))
+    value = entry.get('value') if available else None
+    return {
+        'key': info.key,
+        'index': info.index,
+        'label': info.label,
+        'unit': info.unit,
+        'scale': info.scale,
+        'display_offset': info.display_offset if hasattr(info, 'display_offset') else info.offset,
+        'available': available,
+        'value': value,
+        'display_value': info.to_display(value) if value is not None else None,
+        'min_value': entry.get('min_value') if available else None,
+        'max_value': entry.get('max_value') if available else None,
+    }
+
+
+@bp.route('/api/boiler-control/mixers', methods=['GET'])
+def get_boiler_control_mixers():
+    """Parametry mieszaczy (0x32/0xB2) z danymi na zywo z ramki 0x35."""
+    if not _is_boiler_control_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Brak uprawnień'}), 403
+    if not (_connection and getattr(_connection, 'connected', False)):
+        return jsonify({'status': 'error', 'message': 'Brak połączenia z modułem EW11A'}), 503
+
+    mixers = _get_mixer_params_cached(force_refresh=request.args.get('refresh') == '1')
+    if not mixers:
+        return jsonify({'status': 'error', 'message': 'Brak odpowiedzi sterownika (0xB2)'}), 504
+
+    last_data = _connection.last_data
+    live = getattr(last_data, 'mixer_data', []) if last_data else []
+    result = []
+    for mixer_index in sorted(mixers):
+        params = mixers[mixer_index]
+        if not any(p.get('available') for p in params.values()):
+            continue
+        live_entry = live[mixer_index] if mixer_index < len(live) else {}
+        rows = []
+        for info in MIXER_PARAMETERS:
+            row = _param_row(info, params.get(info.index))
+            row.update({'widget': info.widget, 'value_map': info.value_map})
+            rows.append(row)
+        result.append({
+            'index': mixer_index,
+            'name': f'Mieszacz {mixer_index + 1}',
+            'connected': live_entry.get('current_temp') is not None,
+            'live': live_entry,
+            'parameters': rows,
+        })
+    return jsonify({'status': 'ok', 'count': len(result), 'data': result})
+
+
+@bp.route('/api/boiler-control/controller-parameters', methods=['GET'])
+def get_controller_parameters_overview():
+    """Wszystkie parametry sterownika (0x31/0xB1) z polskimi nazwami - tylko odczyt."""
+    params = _get_ecomax_limits_cached(force_refresh=False)
+    if not params:
+        return jsonify({'status': 'error', 'message': 'Brak odpowiedzi sterownika (0xB1)'}), 504
+    catalog_indexes = {p.index for p in PARAMETERS}
+    rows = []
+    for info in ECOMAX_P_PARAMETERS:
+        entry = params.get(info.index)
+        if not entry or not entry.get('available'):
+            continue
+        row = _param_row(info, entry)
+        row.update({'group': info.group, 'editable_in_catalog': info.index in catalog_indexes})
+        rows.append(row)
+    return jsonify({'status': 'ok', 'count': len(rows), 'data': rows})
+
+
+@bp.route('/api/boiler-control/service-parameters', methods=['GET'])
+def get_service_parameters():
+    """Surowe parametry serwisowe (0x61/0xE1) - wymagany token serwisowy."""
+    if not _is_boiler_service_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Wymagany token serwisowy'}), 403
+    if not (_connection and getattr(_connection, 'connected', False)):
+        return jsonify({'status': 'error', 'message': 'Brak połączenia z modułem EW11A'}), 503
+    try:
+        params = _execute_blocking(_connection.request_service_parameters, timeout=3.0)
+    except TimeoutError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 504
+    except Exception as exc:
+        logging.getLogger(__name__).warning('Blad odczytu parametrow serwisowych: %s', exc)
+        return jsonify({'status': 'error', 'message': 'Nie udało się odczytać parametrów serwisowych'}), 503
+    rows = [
+        {'index': index, **entry}
+        for index, entry in sorted(params.items())
+        if entry.get('available')
+    ]
+    return jsonify({'status': 'ok', 'count': len(rows), 'data': rows})
+
+
+@bp.route('/api/boiler-control/power', methods=['POST'])
+def set_boiler_power():
+    """Wlacz lub wylacz kociol (regulator) - ramka 0x3B."""
+    if not request.is_json:
+        return jsonify({'status': 'error', 'message': 'Wymagany Content-Type: application/json'}), 415
+    if not _is_boiler_control_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Brak uprawnień do sterowania kotłem'}), 403
+    if not (_connection and getattr(_connection, 'connected', False)):
+        return jsonify({'status': 'error', 'message': 'Brak połączenia z modułem EW11A'}), 503
+
+    payload = request.get_json(silent=True) or {}
+    # Scisla walidacja: niejednoznaczna wartosc nie moze wylaczyc kotla.
+    enabled_raw = payload.get('enabled')
+    strict_values = {True: True, False: False, 1: True, 0: False,
+                     '1': True, '0': False, 'true': True, 'false': False}
+    key = enabled_raw.strip().lower() if isinstance(enabled_raw, str) else enabled_raw
+    if not isinstance(key, (bool, int, str)) or key not in strict_values:
+        return jsonify({'status': 'error', 'message': 'Pole enabled musi mieć wartość true lub false'}), 400
+    enabled = strict_values[key]
+    request_id = str(payload.get('request_id') or uuid.uuid4())
+    last_data = _connection.last_data
+    old_mode = getattr(last_data, 'mode', None) if last_data else None
+    old_value = None if old_mode is None else ('0' if old_mode == 0 else '1')
+
+    log_common = dict(
+        request_id=request_id, source=_resolve_request_source(), target_type='ecomax',
+        target_index=0, param_key='BOILER_POWER', param_index=-1,
+        old_value=old_value, new_value='1' if enabled else '0',
+    )
+    try:
+        ack = _execute_blocking(_connection.set_boiler_power, enabled, timeout=3.0)
+    except TimeoutError as exc:
+        _log_boiler_change(status='timeout', message=str(exc), **log_common)
+        return jsonify({'status': 'error', 'message': str(exc)}), 504
+    except Exception as exc:
+        logging.getLogger(__name__).error('Blad wlaczania/wylaczania kotla: %s', exc, exc_info=True)
+        _log_boiler_change(status='error', message='Nie udało się zmienić stanu kotła', **log_common)
+        return jsonify({'status': 'error', 'message': 'Nie udało się zmienić stanu kotła'}), 500
+
+    message = 'Kocioł włączony' if enabled else 'Kocioł wyłączony'
+    _log_boiler_change(status='ok', message=message, **log_common)
+    return jsonify({'status': 'ok', 'message': message, 'data': {'enabled': enabled, 'ack': ack}})
 
 
 @bp.route('/api/boiler-control/service-access', methods=['GET'])
@@ -1520,6 +1801,7 @@ def set_boiler_control_parameter():
         )
         return jsonify({'status': 'error', 'message': 'Nie udało się zapisać parametru'}), 500
 
+    _invalidate_controller_caches(target_type)
     _log_boiler_change(
         request_id=request_id,
         source=source,
@@ -1620,6 +1902,7 @@ def set_boiler_control_batch():
                 timeout=2.0,
             )
 
+            _invalidate_controller_caches(resolved['target_type'])
             _log_boiler_change(
                 request_id=item_payload['request_id'],
                 source=source,
@@ -1704,7 +1987,15 @@ def get_boiler_control_schedules_raw():
 
     try:
         data = _execute_blocking(_connection.request_schedules_raw, timeout=2.0)
-        return jsonify({'status': 'ok', 'data': data})
+        # Surowe bajty i ramka nie są serializowalne do JSON — zwracamy postać hex.
+        payload_hex = str(data.get('payload_hex') or '')
+        return jsonify({
+            'status': 'ok',
+            'data': {
+                'payload_hex': payload_hex,
+                'size': len(payload_hex) // 2,
+            },
+        })
     except TimeoutError as exc:
         return jsonify({'status': 'error', 'message': str(exc)}), 504
     except Exception as exc:
@@ -1937,6 +2228,8 @@ def export_csv():
         'temp_feeder', 'temp_external', 'temp_co_set', 'temp_cwu_set',
         'boiler_power', 'boiler_power_kw', 'fan_power', 'fuel_stream',
         'fuel_level', 'mode_name', 'pump_co', 'pump_cwu', 'pump_circulation',
+        'fan_on', 'feeder_on', 'lighter_on', 'alarm_output', 'thermostat_contact',
+        'mixer1_temp', 'mixer1_target', 'mixer1_pump', 'mixer1_valve',
     ]
 
     buf = io.StringIO()
@@ -1997,6 +2290,102 @@ def get_costs():
             'cost_per_day': round(total_cost / (hours / 24), 2) if hours >= 1 else 0,
         }
     })
+
+
+@bp.route('/api/fuel-info')
+def get_fuel_info():
+    """Informacje o paliwie i mocy: kalorycznosc ze sterownika, moc nominalna z ustawien.
+
+    Moc kotla w kW raportowana przez sterownik jest szacowana na podstawie
+    strumienia paliwa i kalorycznosci ustawionej w sterowniku (parametr 88),
+    dlatego UI pokazuje ja razem z ta kalorycznoscia.
+    """
+    calorific = None
+    params = _get_ecomax_limits_cached(force_refresh=False)
+    entry = params.get(FUEL_CALORIFIC_VALUE_INDEX) if params else None
+    if entry and entry.get('available') and entry.get('value') is not None:
+        calorific = PARAMETERS_BY_KEY['FUEL_CALORIFIC_VALUE'].to_display(entry['value'])
+
+    cfg = _database.get_all_config() if _database else {}
+    return jsonify({
+        'status': 'ok',
+        'data': {
+            'calorific_value_kwh_kg': calorific,
+            'boiler_nominal_power_kw': parse_nominal_power(cfg),
+            'fuel_level_not_set': is_fuel_level_not_set(cfg),
+        },
+    })
+
+
+@bp.route('/api/analytics/daily')
+def get_analytics_daily():
+    """Dzienne podsumowanie pracy kotla (liczone z kazdej ramki przez OperationTracker).
+
+    Na dzien: czas obserwacji i w trybach, cykle pracy, rozpalenia i ich skutecznosc
+    (z alarmow sterownika "nieudana proba rozpalania"), czas pracy podajnika/wentylatora/
+    zapalarki, energia (szacowana przez sterownik) i paliwo, koszt i koszt kWh.
+    """
+    if not _database:
+        return jsonify({'status': 'error', 'message': 'Brak bazy danych'}), 500
+    days = request.args.get('days', 14, type=int) or 14
+    days = min(max(days, 1), 366)
+    # Dni kalendarzowe (odejmowanie 86400 s myli sie przy zmianie czasu letni/zimowy).
+    since_day = (datetime.date.today() - datetime.timedelta(days=days - 1)).isoformat()
+    stats = _database.get_daily_stats(since_day)
+
+    try:
+        price_per_ton = float(_database.get_config('fuel_price_per_ton', '1000'))
+    except (ValueError, TypeError):
+        price_per_ton = 1000.0
+
+    failures_by_day: dict[str, int] = defaultdict(int)
+    day_start = time.mktime(time.strptime(since_day, '%Y-%m-%d'))
+    for alarm in _database.get_controller_alarms(limit=None, since=day_start, code=ALARM_KINDLING_FAILURE):
+        failures_by_day[time.strftime('%Y-%m-%d', time.localtime(alarm['start_ts']))] += 1
+
+    result = []
+    for day in sorted(set(stats) | set(failures_by_day)):
+        metrics = stats.get(day, {})
+        observed = metrics.get(METRIC_OBSERVED, 0.0)
+        mode_hours = {}
+        for metric, value in metrics.items():
+            if metric.startswith(MODE_METRIC_PREFIX):
+                try:
+                    mode = int(metric[len(MODE_METRIC_PREFIX):])
+                except ValueError:
+                    continue
+                mode_hours[str(mode)] = {
+                    'name': MODE_NAMES.get(mode, f'Tryb {mode}'),
+                    'hours': round(value / 3600.0, 3),
+                    'percent': round(value / observed * 100.0, 1) if observed else None,
+                }
+        kindlings = int(round(metrics.get(METRIC_KINDLINGS, 0)))
+        failures = failures_by_day.get(day, 0)
+        energy = metrics.get(METRIC_ENERGY, 0.0)
+        fuel = metrics.get(METRIC_FUEL, 0.0)
+        cost = fuel / 1000.0 * price_per_ton
+        success_rate = None
+        if kindlings > 0:
+            success_rate = round(max(0.0, (kindlings - failures) / kindlings * 100.0), 1)
+        result.append({
+            'day': day,
+            'observed_hours': round(observed / 3600.0, 2),
+            'coverage_percent': round(min(100.0, observed / 86400.0 * 100.0), 1),
+            'modes': mode_hours,
+            'work_cycles': int(round(metrics.get(METRIC_WORK_CYCLES, 0))),
+            'kindlings': kindlings,
+            'kindling_failures': failures,
+            'kindling_success_percent': success_rate,
+            'lighter_starts': int(round(metrics.get(METRIC_LIGHTER_STARTS, 0))),
+            'feeder_minutes': round(metrics.get(METRIC_FEEDER, 0.0) / 60.0, 1),
+            'fan_hours': round(metrics.get(METRIC_FAN, 0.0) / 3600.0, 2),
+            'lighter_minutes': round(metrics.get(METRIC_LIGHTER, 0.0) / 60.0, 1),
+            'energy_kwh': round(energy, 2),
+            'fuel_kg': round(fuel, 2),
+            'cost_pln': round(cost, 2),
+            'cost_per_kwh': round(cost / energy, 3) if energy > 0 else None,
+        })
+    return jsonify({'status': 'ok', 'days': days, 'price_per_ton': price_per_ton, 'data': result})
 
 
 @bp.route('/api/report')
@@ -2075,6 +2464,146 @@ def get_alerts():
     return jsonify({'status': 'error', 'data': [], 'count': 0})
 
 
+def _format_controller_alarm(row: dict) -> dict:
+    start_ts = row.get('start_ts')
+    end_ts = row.get('end_ts')
+    ongoing = end_ts is None
+    duration_ref = time.time() if ongoing else end_ts
+    duration_min = None
+    if isinstance(start_ts, (int, float)) and isinstance(duration_ref, (int, float)):
+        duration_min = max(0, round((duration_ref - start_ts) / 60.0, 1))
+    return {
+        'id': row.get('id'),
+        'code': row.get('code'),
+        'name': alarm_name(row.get('code')),
+        'start': row.get('start_text'),
+        'end': row.get('end_text'),
+        'start_ts': start_ts,
+        'end_ts': end_ts,
+        'ongoing': ongoing,
+        'duration_min': duration_min,
+    }
+
+
+@bp.route('/api/controller-alarms', methods=['GET'])
+def get_controller_alarms():
+    """Historia alarmow odczytana ze sterownika (najnowsze pierwsze)."""
+    if not _database:
+        return jsonify({'status': 'error', 'message': 'Brak bazy danych'}), 500
+    limit = request.args.get('limit', 200, type=int) or 200
+    rows = _database.get_controller_alarms(limit=min(max(limit, 1), 10000))
+    pending = None
+    if _controller_sync is not None:
+        pending = TASK_ALARMS in _controller_sync.pending_tasks()
+    return jsonify({
+        'status': 'ok',
+        'count': len(rows),
+        'total': _database.count_controller_alarms(),
+        'refresh_pending': pending,
+        'data': [_format_controller_alarm(r) for r in rows],
+    })
+
+
+@bp.route('/api/controller-alarms/refresh', methods=['POST'])
+def refresh_controller_alarms():
+    """Zlec odczyt historii alarmow ze sterownika (wykonywany w tle)."""
+    if not _is_boiler_control_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Brak uprawnień'}), 403
+    if (
+        _controller_sync is None
+        or not _controller_sync.running
+        or not (_connection and getattr(_connection, 'connected', False))
+    ):
+        return jsonify({'status': 'error', 'message': 'Brak połączenia ze sterownikiem'}), 503
+    _controller_sync.request(TASK_ALARMS)
+    return jsonify({'status': 'ok', 'message': 'Zlecono odczyt alarmów ze sterownika'})
+
+
+def _regdata_labels() -> dict:
+    raw = (_database.get_config(CONFIG_REGDATA_LABELS, '') if _database else '') or ''
+    try:
+        labels = json.loads(raw) if raw else {}
+    except ValueError:
+        labels = {}
+    return labels if isinstance(labels, dict) else {}
+
+
+@bp.route('/api/regdata', methods=['GET'])
+def get_regdata():
+    """Ostatnie dane regulatora (ramka 0x08) z nazwami pol."""
+    schema = list(getattr(_connection, 'regdata_schema', []) or []) if _connection else []
+    last = getattr(_connection, 'last_regdata', None) if _connection else None
+    labels = _regdata_labels()
+    rows = []
+    for row in (last or {}).get('rows', []):
+        name, source = regdata_module.field_name(row['id'], labels)
+        value = row['value']
+        if isinstance(value, int) and not isinstance(value, bool) and abs(value) > _JS_SAFE_INT:
+            value = str(value)   # JSON.parse w przegladarce zaokraglilby liczby 64-bitowe
+        rows.append({
+            'position': row['position'],
+            'id': row['id'],
+            'type': row['type'],
+            'type_name': regdata_module.TYPE_NAMES.get(row['type'], str(row['type'])),
+            'value': value,
+            'name': name,
+            'name_source': source,
+        })
+    status = 'ok' if rows else ('no_schema' if not schema else 'no_data')
+    return jsonify({
+        'status': status,
+        'schema_fields': len(schema),
+        'timestamp': (last or {}).get('timestamp'),
+        'decode_errors': getattr(_connection, 'regdata_decode_errors', 0) if _connection else 0,
+        'data': rows,
+    })
+
+
+@bp.route('/api/regdata/labels', methods=['POST'])
+def set_regdata_label():
+    """Ustaw wlasna nazwe pola danych regulatora (pusta nazwa usuwa etykiete)."""
+    if not _is_boiler_control_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Brak uprawnień'}), 403
+    if not _database:
+        return jsonify({'status': 'error', 'message': 'Brak bazy danych'}), 500
+    payload = request.get_json(silent=True) or {}
+    try:
+        field_id = int(payload.get('id'))
+    except (TypeError, ValueError):
+        return jsonify({'status': 'error', 'message': 'Pole id musi być liczbą'}), 400
+    if not (0 <= field_id <= 0xFFFF):
+        return jsonify({'status': 'error', 'message': 'id poza zakresem 0-65535'}), 400
+    label = str(payload.get('label') or '').strip()
+    if len(label) > _REGDATA_LABEL_MAX_LEN:
+        return jsonify({'status': 'error', 'message': f'Nazwa może mieć maks. {_REGDATA_LABEL_MAX_LEN} znaków'}), 400
+
+    with _regdata_labels_lock:
+        labels = _regdata_labels()
+        if label:
+            labels[str(field_id)] = label
+        else:
+            labels.pop(str(field_id), None)
+        saved = _database.set_config(CONFIG_REGDATA_LABELS, json.dumps(labels, ensure_ascii=False))
+    if not saved:
+        return jsonify({'status': 'error', 'message': 'Nie udało się zapisać nazwy'}), 500
+    return jsonify({'status': 'ok', 'data': {'id': field_id, 'label': label or None}})
+
+
+@bp.route('/api/regdata/refresh-schema', methods=['POST'])
+def refresh_regdata_schema():
+    """Zlec ponowne pobranie schematu danych regulatora (0x55)."""
+    if not _is_boiler_control_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Brak uprawnień'}), 403
+    if (
+        _controller_sync is None
+        or not _controller_sync.running
+        or not (_connection and getattr(_connection, 'connected', False))
+    ):
+        return jsonify({'status': 'error', 'message': 'Brak połączenia ze sterownikiem'}), 503
+    _controller_sync.request(TASK_REGDATA_SCHEMA)
+    return jsonify({'status': 'ok', 'message': 'Zlecono pobranie schematu danych regulatora'})
+
+
 @bp.route('/api/alerts/read', methods=['POST'])
 def mark_alerts_read():
     """Oznacz wszystkie alerty jako przeczytane."""
@@ -2106,7 +2635,7 @@ def alerts_page():
 def get_config():
     """Pobierz wszystkie ustawienia."""
     if _database:
-        data = _database.get_all_config()
+        data = {k: v for k, v in _database.get_all_config().items() if k not in _INTERNAL_CONFIG_KEYS}
         data['available_visible_sensors'] = list(DASHBOARD_TILE_KEYS)
         return jsonify({'status': 'ok', 'data': data})
     return jsonify({'status': 'error', 'data': {}})
@@ -2135,6 +2664,7 @@ def set_config():
         'log_retention_days':     (1, 365),
         'alert_no_connection_min':(1, 1440),
         'log_enabled':            (0, 1),
+        'fuel_level_not_set':     (0, 1),
     }
     _FLOAT_RANGES = {
         'fuel_price_per_ton':   (0.0, 1_000_000.0),
@@ -2176,6 +2706,21 @@ def set_config():
                 rejected.append({'key': key, 'reason': f'value out of range [{lo}, {hi}]'})
                 continue
             value_to_store = str(v)
+
+        elif key == 'boiler_nominal_power_kw':
+            v = str(value if value is not None else '').strip()
+            if v == '':
+                value_to_store = ''
+            else:
+                try:
+                    fv = _parse_float_maybe_comma(v)
+                except (ValueError, TypeError):
+                    rejected.append({'key': key, 'reason': 'expected number'})
+                    continue
+                if not (0.1 <= fv <= 1000.0):
+                    rejected.append({'key': key, 'reason': 'value out of range [0.1, 1000]'})
+                    continue
+                value_to_store = str(fv)
 
         elif key == 'ew11a_host':
             v = str(value).strip()
@@ -2399,6 +2944,9 @@ def reset_runtime_data():
         return jsonify({'status': 'error', 'message': 'Brak uprawnień do resetu danych'}), 403
 
     try:
+        # Najpierw tracker (czeka na trwajacy zapis), potem baza - stare przyrosty nie wroca.
+        if _operation_tracker is not None:
+            _operation_tracker.reset()
         details = _database.reset_runtime_data()
         return jsonify({
             'status': 'ok',
@@ -2421,6 +2969,8 @@ def reset_all_data_and_config():
         return jsonify({'status': 'error', 'message': 'Brak uprawnień do resetu danych'}), 403
 
     try:
+        if _operation_tracker is not None:
+            _operation_tracker.reset()
         details = _database.reset_all_data_and_config()
         with _weather_cache_lock:
             _weather_data_cache.clear()
@@ -2573,11 +3123,11 @@ def restart_app():
         )
         if result.returncode == 0:
             return jsonify({'status': 'ok', 'message': 'Restart zlecony'})
-            return jsonify({'status': 'error', 'message': result.stderr.strip() or 'Błąd restartu'}), 500
+        return jsonify({'status': 'error', 'message': result.stderr.strip() or 'Błąd restartu'}), 500
     except subprocess.TimeoutExpired:
-            return jsonify({'status': 'error', 'message': 'Timeout - brak odpowiedzi systemd'}), 500
+        return jsonify({'status': 'error', 'message': 'Timeout - brak odpowiedzi systemd'}), 500
     except FileNotFoundError:
-            return jsonify({'status': 'error', 'message': 'Polecenie systemctl niedostępne na tym systemie'}), 500
+        return jsonify({'status': 'error', 'message': 'Polecenie systemctl niedostępne na tym systemie'}), 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -2611,6 +3161,16 @@ def ha_sensor():
             'pump_co':       bool(d.get('pump_co')),
             'pump_cwu':      bool(d.get('pump_cwu')),
             'pump_circulation': bool(d.get('pump_circulation')),
+            'fan_on':        bool(d.get('fan_on')),
+            'feeder_on':     bool(d.get('feeder_on')),
+            'lighter_on':    bool(d.get('lighter_on')),
+            'alarm_output':  bool(d.get('alarm_output')),
+            'thermostat_contact': d.get('thermostat_contact'),
+            'mixer1_temp':   d.get('mixer1_temp'),
+            'mixer1_target': d.get('mixer1_target'),
+            'mixer1_pump':   d.get('mixer1_pump'),
+            'mixer1_valve':  d.get('mixer1_valve'),
+            'pending_alerts': d.get('pending_alerts'),
             'mode':          d.get('mode'),
             'mode_name':     d.get('mode_name'),
             'timestamp':     d.get('timestamp'),
@@ -2656,6 +3216,16 @@ def prometheus_metrics():
     metric('pump_co',        int(bool(d.get('pump_co'))),    'Pompa CO (0/1)')
     metric('pump_cwu',       int(bool(d.get('pump_cwu'))),   'Pompa CWU (0/1)')
     metric('pump_circulation',int(bool(d.get('pump_circulation'))),'Pompa cyrkulacji (0/1)')
+    metric('fan_on',         int(bool(d.get('fan_on'))),     'Wentylator (0/1)')
+    metric('feeder_on',      int(bool(d.get('feeder_on'))),  'Podajnik (0/1)')
+    metric('lighter_on',     int(bool(d.get('lighter_on'))), 'Zapalarka (0/1)')
+    metric('alarm_output',   int(bool(d.get('alarm_output'))), 'Wyjscie alarmowe (0/1)')
+    metric('pending_alerts', d.get('pending_alerts_count'),  'Liczba aktywnych alarmow sterownika')
+    metric('mixer1_temp',    d.get('mixer1_temp'),    'Mieszacz 1 - temperatura (C)')
+    metric('mixer1_target',  d.get('mixer1_target'),  'Mieszacz 1 - temperatura zadana (C)')
+    metric('mixer1_valve',   d.get('mixer1_valve'),   'Mieszacz 1 - otwarcie zaworu (%)')
+    if d.get('mixer1_pump') is not None:
+        metric('mixer1_pump', int(bool(d.get('mixer1_pump'))), 'Mieszacz 1 - pompa (0/1)')
     metric('mode',           d.get('mode'),           'Tryb pracy kotla')
 
     return Response('\n'.join(lines) + '\n', mimetype='text/plain; version=0.0.4')
@@ -2726,7 +3296,8 @@ def download_logs():
 def get_status():
     """Status polaczenia i aplikacji."""
     return jsonify({
-        'uptime': time.time(),
+        'uptime': round(time.time() - _APP_STARTED_AT, 1),
+        'started_at': _APP_STARTED_AT,
         'connection': _connection.get_status() if _connection else None,
     })
 

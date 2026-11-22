@@ -20,12 +20,15 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from alerts import AlertEngine
+from analytics import OperationTracker
+from controller_sync import ControllerSync
 from database import Database
+from derived_data import apply_config_overrides
 from econet.connection import EW11AConnection
 from econet.decoder import BoilerData
 from logger import setup_file_logging, cleanup_old_logs
 from web.app import create_app, socketio, emit_data, emit_alert
-from web.routes import init_routes
+from web.routes import init_routes, update_boiler_limits_cache
 
 # Stale startowe (niezalezne od bazy danych)
 _FLASK_HOST        = "0.0.0.0"
@@ -77,8 +80,10 @@ def parse_args():
 class Simulator:
     """Symulator danych z kotla (do testow bez sprzetu)."""
 
-    def __init__(self, on_data_callback, interval=5):
+    def __init__(self, on_data_callback, interval=5, preprocess_callback=None, frame_callback=None):
         self.on_data_callback = on_data_callback
+        self.preprocess_callback = preprocess_callback
+        self.frame_callback = frame_callback
         self.interval = interval
         self._running = False
         self._thread = None
@@ -158,13 +163,23 @@ class Simulator:
             data.work_time_50 = 820
             data.work_time_33 = 1100
 
+            # Bledy callbackow nie moga zatrzymac petli symulatora (jak w EW11AConnection).
+            for callback in (self.frame_callback, self.preprocess_callback):
+                if callback:
+                    try:
+                        callback(data)
+                    except Exception as e:
+                        logger.error("Symulator: blad callbacku: %s", e, exc_info=True)
             with self._lock:
                 self._last_data = data
             self.frames_received += 1
             self.last_frame_time = time.time()
 
             if self.on_data_callback:
-                self.on_data_callback(data)
+                try:
+                    self.on_data_callback(data)
+                except Exception as e:
+                    logger.error("Symulator: blad on_data_callback: %s", e, exc_info=True)
 
             # Powolne zmiany
             base_temp += random.uniform(-0.3, 0.3)
@@ -223,9 +238,24 @@ def main():
             db.save_measurement(boiler_data.to_dict())
             last_save_time = now
 
+    def preprocess_data(boiler_data):
+        # Korekty zalezne od ustawien (poziom paliwa, moc %) - stosowane przed
+        # opublikowaniem danych w connection.last_data, aby REST API, /api/ha,
+        # /metrics i WebSocket widzialy te same wartosci.
+        apply_config_overrides(boiler_data, db.get_all_config())
+
+    # Analityka pracy kotla (z kazdej ramki, niezaleznie od read_interval). Symulator
+    # generuje ramke co read_interval, wiec dopuszczalna przerwa musi byc od niego dluzsza.
+    operation_tracker = OperationTracker(
+        db,
+        max_gap=max(60.0, read_interval * 2.5) if args.simulate else 60.0,
+    )
+
     # Polaczenie z EW11A lub symulator
     if args.simulate:
-        connection = Simulator(on_data_callback=on_new_data, interval=read_interval)
+        connection = Simulator(on_data_callback=on_new_data, interval=read_interval,
+                               preprocess_callback=preprocess_data,
+                               frame_callback=operation_tracker.on_frame)
         logger.info("=== Tryb SYMULACJI ===")
     else:
         connection = EW11AConnection(
@@ -233,6 +263,8 @@ def main():
             port=ew11a_port,
             on_data_callback=on_new_data,
             read_interval=read_interval,
+            preprocess_callback=preprocess_data,
+            frame_callback=operation_tracker.on_frame,
         )
         logger.info("Laczenie z EW11A: %s:%d", ew11a_host, ew11a_port)
 
@@ -242,11 +274,29 @@ def main():
         db_save_interval,
     )
 
+    def on_new_controller_alarm(alarm):
+        end = alarm.get('end')
+        period = f"do {end:%Y-%m-%d %H:%M}" if end else "trwa"
+        alert_engine.fire(
+            'controller_alarm',
+            f"{alarm['name']} (kod {alarm['code']}) od {alarm['start']:%Y-%m-%d %H:%M}, {period}",
+        )
+
+    controller_sync = ControllerSync(
+        connection,
+        db,
+        on_parameters=update_boiler_limits_cache,
+        on_new_alarm=on_new_controller_alarm,
+    )
+
     # Flask app
     app = create_app()
-    init_routes(connection, db)
+    init_routes(connection, db, controller_sync, operation_tracker)
 
     # Start polaczenia/symulatora
+    controller_sync.load_stored_regdata_schema()
+    controller_sync.start()
+    operation_tracker.start()
     connection.start()
     alert_engine.start()
 
@@ -269,8 +319,10 @@ def main():
     def _shutdown(signum, frame):
         logger.info("Otrzymano sygnal %d - zamykanie...", signum)
         _stop_event.set()
+        controller_sync.stop()
         alert_engine.stop()
         connection.stop()
+        operation_tracker.stop()
         db.close()
         sys.exit(0)
 

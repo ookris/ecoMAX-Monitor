@@ -11,9 +11,34 @@ import logging
 import datetime
 import queue
 
-from econet import protocol, decoder
+from functools import reduce
+
+from econet import alarms, protocol, decoder, regdata
+from econet.mixer_parameters import parse_mixer_parameters_payload
 
 logger = logging.getLogger(__name__)
+
+
+_UID_BASE32_KEY = "0123456789ABCDEFGHIJKLMNZPQRSTUV"
+
+
+def _crc16_uid(buffer: bytes) -> bytes:
+    def _byte(crc, value):
+        crc ^= value
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+        return crc
+    return reduce(_byte, buffer, 0xA3A3).to_bytes(2, byteorder='little')
+
+
+def format_uid(uid_bytes: bytes) -> str:
+    """UID w formacie ecoNET (jak PyPlumIO unpack_uid: base32 z CRC16)."""
+    number = int.from_bytes(bytes(uid_bytes) + _crc16_uid(bytes(uid_bytes)), byteorder='little')
+    output = []
+    while number:
+        output.append(_UID_BASE32_KEY[number & 0x1F])
+        number >>= 5
+    return ''.join(reversed(output))
 
 
 def _format_bytes_hex(data, limit=256):
@@ -36,10 +61,17 @@ class EW11AConnection:
     RECONNECT_DELAY_INITIAL = 1
     RECONNECT_DELAY_MAX = 30
 
-    def __init__(self, host, port, on_data_callback=None, read_interval=0):
+    def __init__(self, host, port, on_data_callback=None, read_interval=0,
+                 preprocess_callback=None, frame_callback=None):
         self.host = host
         self.port = port
         self.on_data_callback = on_data_callback
+        # Wywolywany przed opublikowaniem danych w last_data (np. korekty z ustawien),
+        # aby wszystkie endpointy widzialy juz skorygowane wartosci.
+        self.preprocess_callback = preprocess_callback
+        # Wywolywany dla KAZDEJ wiarygodnej ramki danych (bez throttlingu read_interval),
+        # np. analityka czasu pracy. Musi byc szybki - dziala w watku odczytu.
+        self.frame_callback = frame_callback
         self.read_interval = max(0.0, float(read_interval or 0))
 
         self._socket = None
@@ -60,8 +92,23 @@ class EW11AConnection:
             protocol.FRAME_GET_PARAMS_ANS: queue.Queue(maxsize=20),
             protocol.FRAME_SCHEDULES_ANS: queue.Queue(maxsize=20),
             protocol.FRAME_UID_ANS: queue.Queue(maxsize=5),
+            protocol.FRAME_ALARMS_ANS: queue.Queue(maxsize=20),
+            protocol.FRAME_GET_MIXER_PARAMS_ANS: queue.Queue(maxsize=5),
+            protocol.FRAME_GET_SERVICE_PARAMS_ANS: queue.Queue(maxsize=5),
+            protocol.FRAME_SET_BOILER_CONTROL_ANS: queue.Queue(maxsize=5),
+            protocol.FRAME_REGDATA_SCHEMA_ANS: queue.Queue(maxsize=5),
         }
+
+        # Dane regulatora (ramka 0x08) dekodowane wg schematu z 0x55/0xD5
+        self._regdata_schema: list[tuple[int, int]] = []
+        self._regdata_schema_version: int | None = None
+        self._last_regdata: dict | None = None
+        self.regdata_decode_errors = 0
         self._device_info: dict | None = None
+
+        # Tabela wersji ramek z 0x35 i nasluchujacy zmian (patrz add_frame_version_listener)
+        self._frame_versions: dict[int, int] = {}
+        self._frame_version_listeners: list = []
 
         # Statystyki
         self.frames_received = 0
@@ -254,6 +301,9 @@ class EW11AConnection:
             if boiler_data:
                 self._update_data(boiler_data)
 
+        elif frame_type == protocol.FRAME_REGDATA:
+            self._handle_regdata_frame(frame)
+
         elif frame_type == protocol.FRAME_CHECK_DEVICE:
             # Sterownik pyta czy jestesmy - odpowiadamy B0
             if self._socket and self._connected:
@@ -272,6 +322,85 @@ class EW11AConnection:
 
         else:
             logger.debug("Ramka typu 0x%02X (nieobslugiwana)", frame_type)
+
+    def add_frame_version_listener(self, callback):
+        """Zarejestruj callback(changes) wywolywany przy zmianie wersji ramek.
+
+        `changes` to dict {typ_ramki: (stara_wersja | None, nowa_wersja)}; przy
+        pierwszej obserwacji stara wersja to None. Callback jest wywolywany w watku
+        odczytu z EW11A, wiec NIE moze blokowac ani wysylac zapytan synchronicznie
+        (odpowiedz odbiera ten sam watek) - powinien jedynie zlecic prace.
+        """
+        self._frame_version_listeners.append(callback)
+
+    @property
+    def frame_versions(self) -> dict[int, int]:
+        with self._lock:
+            return dict(self._frame_versions)
+
+    def _process_frame_versions(self, versions):
+        if not versions:
+            return
+        with self._lock:
+            changes = {
+                frame_type: (self._frame_versions.get(frame_type), version)
+                for frame_type, version in versions.items()
+                if self._frame_versions.get(frame_type) != version
+            }
+            self._frame_versions.update(versions)
+        if not changes:
+            return
+        logger.debug("Zmiana wersji ramek: %s", {f'0x{k:02X}': v for k, v in changes.items()})
+        for listener in list(self._frame_version_listeners):
+            try:
+                listener(changes)
+            except Exception as e:
+                logger.error("Blad listenera wersji ramek: %s", e, exc_info=True)
+
+    # ------------------------------------------------- dane regulatora (0x08)
+
+    def set_regdata_schema(self, schema, version=None) -> None:
+        """Ustaw schemat danych regulatora; `version` = wersja ramki 0x55, z ktorej pochodzi."""
+        with self._lock:
+            self._regdata_schema = [(int(i), int(t)) for i, t in (schema or [])]
+            self._regdata_schema_version = int(version) if version is not None else None
+            self._last_regdata = None
+            self.regdata_decode_errors = 0
+
+    @property
+    def regdata_schema(self) -> list[tuple[int, int]]:
+        with self._lock:
+            return list(self._regdata_schema)
+
+    @property
+    def last_regdata(self) -> dict | None:
+        with self._lock:
+            return self._last_regdata
+
+    def _handle_regdata_frame(self, frame) -> None:
+        if frame.get('source') != protocol.ADDR_ECOMAX:
+            return
+        with self._lock:
+            schema = self._regdata_schema
+            schema_version = self._regdata_schema_version
+        if not schema:
+            return
+        rows = regdata.decode_regdata_payload(bytes(frame.get('payload') or b''), schema, schema_version)
+        with self._lock:
+            if rows is None:
+                self.regdata_decode_errors += 1
+                return
+            self._last_regdata = {'timestamp': time.time(), 'rows': rows}
+
+    def request_regdata_schema(self, timeout=3.0) -> list[tuple[int, int]]:
+        """Pobierz schemat danych regulatora (0x55 -> 0xD5)."""
+        frame = self._request_response(
+            protocol.FrameBuilder.request_regdata_schema(dest_addr=protocol.ADDR_ECOMAX),
+            protocol.FRAME_REGDATA_SCHEMA_ANS,
+            timeout,
+            'Brak odpowiedzi na zapytanie o schemat danych regulatora (0xD5)',
+        )
+        return regdata.parse_schema_payload(bytes(frame.get('payload') or b''))
 
     def _drain_response_queue(self, frame_type):
         response_queue = self._response_queues.get(frame_type)
@@ -448,10 +577,11 @@ class EW11AConnection:
         idx += 1
 
         uid_str = ''
+        uid_hex = ''
         if uid_len > 0 and idx + uid_len <= len(payload):
             uid_bytes = payload[idx:idx + uid_len]
-            # UID jest kodowany w base5 w PyPlumIO - tutaj zwracamy hex
-            uid_str = uid_bytes.hex()
+            uid_hex = uid_bytes.hex()
+            uid_str = format_uid(uid_bytes)
             idx += uid_len
 
         # logo(2) + image(2)
@@ -470,6 +600,7 @@ class EW11AConnection:
             'product_type': product_type,
             'product_id': product_id,
             'uid': uid_str,
+            'uid_hex': uid_hex,
             'model': model,
         }
 
@@ -491,6 +622,98 @@ class EW11AConnection:
         if info.get('model'):  # nie cachuj niepełnych wyników
             self._device_info = info
         return info
+
+    def _request_response(self, frame_bytes, response_type, timeout, error_message, match=None):
+        """Wyslij zapytanie i zwroc odpowiedz danego typu od sterownika ecoMAX.
+
+        Pomija ramki tego typu adresowane do innych urzadzen (np. odpowiedzi dla panelu),
+        przyjmuje odpowiedzi rozgloszeniowe (0x00) i adresowane do ecoNET (0x56).
+        """
+        with self._transaction_lock:
+            self._drain_response_queue(response_type)
+            self.send_frame(frame_bytes)
+            response_queue = self._response_queues[response_type]
+            deadline = time.time() + max(0.1, float(timeout))
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError(error_message)
+                try:
+                    frame = response_queue.get(timeout=remaining)
+                except queue.Empty as exc:
+                    raise TimeoutError(error_message) from exc
+                if (frame.get('source') == protocol.ADDR_ECOMAX
+                        and frame.get('dest') in (protocol.ADDR_BROADCAST, protocol.ADDR_ECONET)
+                        and (match is None or match(frame))):
+                    return frame
+
+    def request_mixer_parameters(self, timeout=3.0) -> dict:
+        """Parametry wszystkich mieszaczy (0x32 -> 0xB2): {mieszacz: {indeks: {...}}}."""
+        frame = self._request_response(
+            protocol.FrameBuilder.request_mixer_parameters(dest_addr=protocol.ADDR_ECOMAX),
+            protocol.FRAME_GET_MIXER_PARAMS_ANS,
+            timeout,
+            'Brak odpowiedzi na zapytanie parametrów mieszaczy (0xB2)',
+        )
+        return parse_mixer_parameters_payload(bytes(frame.get('payload') or b''))
+
+    def request_service_parameters(self, timeout=3.0) -> dict:
+        """Parametry serwisowe (0x61 -> 0xE1): {indeks: {available, value, min_value, max_value}}."""
+        frame = self._request_response(
+            protocol.FrameBuilder.request_service_parameters(dest_addr=protocol.ADDR_ECOMAX),
+            protocol.FRAME_GET_SERVICE_PARAMS_ANS,
+            timeout,
+            'Brak odpowiedzi na zapytanie parametrów serwisowych (0xE1)',
+        )
+        payload = bytes(frame.get('payload') or b'')
+        if len(payload) < 2:
+            return {}
+        # Format jak 0xB1, ale bez bajtu poprzedzajacego: [count][start] + 3 B na parametr.
+        return self._parse_ecomax_parameters_payload(b'\x00' + payload[1:2] + payload[0:1] + payload[2:])
+
+    def set_boiler_power(self, enabled: bool, timeout=3.0) -> dict:
+        """Wlacz/wylacz regulator kotla (0x3B -> 0xBB)."""
+        frame = self._request_response(
+            protocol.FrameBuilder.set_boiler_control(dest_addr=protocol.ADDR_ECOMAX, value=1 if enabled else 0),
+            protocol.FRAME_SET_BOILER_CONTROL_ANS,
+            timeout,
+            'Brak potwierdzenia włączenia/wyłączenia kotła (0xBB)',
+        )
+        return {
+            'ack_type': frame.get('type'),
+            'ack_source': frame.get('source'),
+            'payload_hex': bytes(frame.get('payload') or b'').hex(),
+        }
+
+    def request_alerts(self, start=0, count=alarms.ALERTS_PAGE_SIZE, timeout=3.0) -> dict:
+        """Pobierz strone historii alarmow (0x3D -> 0xBD).
+
+        Odpowiedz jest dopasowywana po polu `start`, bo na magistrali moga pojawic sie
+        ramki 0xBD bedace odpowiedzia na zapytania innych urzadzen.
+        """
+        start = int(start)
+        count = int(count)
+        if not (0 <= start <= 255 and 1 <= count <= 255):
+            raise ValueError('start/count poza zakresem 0..255')
+
+        with self._transaction_lock:
+            self._drain_response_queue(protocol.FRAME_ALARMS_ANS)
+            self.send_frame(protocol.FrameBuilder.request_alerts(
+                dest_addr=protocol.ADDR_ECOMAX, start=start, count=count))
+
+            response_queue = self._response_queues[protocol.FRAME_ALARMS_ANS]
+            deadline = time.time() + max(0.5, float(timeout))
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError('Brak odpowiedzi na zapytanie alarmow (0xBD)')
+                try:
+                    frame = response_queue.get(timeout=remaining)
+                except queue.Empty as exc:
+                    raise TimeoutError('Brak odpowiedzi na zapytanie alarmow (0xBD)') from exc
+                parsed = alarms.decode_alerts_payload(bytes(frame.get('payload') or b''))
+                if parsed is not None and parsed['start'] == start:
+                    return parsed
 
     def get_device_info_cached(self) -> dict | None:
         """Zwróć ostatnio odczytany device info (lub None jeśli nie pobrano)."""
@@ -568,20 +791,18 @@ class EW11AConnection:
         if not (0 <= start <= 255 and 1 <= count <= 255):
             raise ValueError('Zakres start/count musi byc w przedziale 0..255')
 
-        with self._transaction_lock:
-            self._drain_response_queue(protocol.FRAME_GET_PARAMS_ANS)
-            frame = protocol.FrameBuilder.request_ecomax_parameters(
+        response_frame = self._request_response(
+            protocol.FrameBuilder.request_ecomax_parameters(
                 dest_addr=protocol.ADDR_ECOMAX,
                 start=start,
                 count=count,
-            )
-            self.send_frame(frame)
-
-            response_queue = self._response_queues[protocol.FRAME_GET_PARAMS_ANS]
-            try:
-                response_frame = response_queue.get(timeout=max(0.1, float(timeout)))
-            except queue.Empty as exc:
-                raise TimeoutError('Brak odpowiedzi na zapytanie parametrów (0xB1)') from exc
+            ),
+            protocol.FRAME_GET_PARAMS_ANS,
+            timeout,
+            'Brak odpowiedzi na zapytanie parametrów (0xB1)',
+            # Odpowiedz na nasze zapytanie zaczyna sie od zadanego indeksu.
+            match=lambda f: len(f.get('payload') or b'') >= 3 and f['payload'][1] == start,
+        )
 
         payload = response_frame.get('payload') or b''
         parsed = self._parse_ecomax_parameters_payload(payload)
@@ -645,6 +866,9 @@ class EW11AConnection:
                 )
             return
 
+        # Wersje ramek tylko z ramek wiarygodnych (szum na RS485 nie wyzwala synchronizacji).
+        self._process_frame_versions(boiler_data.frame_versions)
+
         # Ramka poprawna – reset licznika i ewentualne INFO o odbudowie
         with self._lock:
             bad_before = self._consecutive_bad
@@ -658,8 +882,20 @@ class EW11AConnection:
         now = time.time()
         self._apply_server_time(boiler_data, now)
 
+        if self.frame_callback:
+            try:
+                self.frame_callback(boiler_data)
+            except Exception as e:
+                logger.error("Blad w frame_callback: %s", e, exc_info=True)
+
         if self.read_interval > 0 and (now - self._last_callback_time) < self.read_interval:
             return
+
+        if self.preprocess_callback:
+            try:
+                self.preprocess_callback(boiler_data)
+            except Exception as e:
+                logger.error("Blad w preprocess_callback: %s", e, exc_info=True)
 
         with self._lock:
             self._last_data = boiler_data

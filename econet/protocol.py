@@ -39,6 +39,9 @@ FRAME_GET_ALARMS = 0x3D
 FRAME_GET_SCHEDULES = 0x36
 FRAME_SET_SCHEDULE = 0x37
 FRAME_GET_THERMOSTAT_PARAMS = 0x5C
+FRAME_GET_SERVICE_PARAMS = 0x61
+FRAME_GET_REGDATA_SCHEMA = 0x55
+FRAME_REGDATA = 0x08
 FRAME_SET_THERMOSTAT_PARAM = 0x5D
 
 # Typy ramek - odpowiedzi
@@ -51,8 +54,11 @@ FRAME_GET_SETTINGS_ANS = 0xB8
 FRAME_UID_ANS = 0xB9
 FRAME_SET_BOILER_CONTROL_ANS = 0xBB
 FRAME_SCHEDULES_ANS = 0xB6
+FRAME_ALARMS_ANS = 0xBD
 FRAME_SET_THERMOSTAT_PARAM_ANS = 0xDD
 FRAME_GET_THERMOSTAT_PARAMS_ANS = 0xDC
+FRAME_GET_SERVICE_PARAMS_ANS = 0xE1
+FRAME_REGDATA_SCHEMA_ANS = 0xD5
 FRAME_TIME = 0x89
 
 # Minimalne/maksymalne dlugosci
@@ -246,9 +252,38 @@ class FrameBuilder:
         return FrameBuilder.create_frame(dest_addr, body)
 
     @staticmethod
+    def request_mixer_parameters(dest_addr=ADDR_ECOMAX, start=0, count=255):
+        """Ramka 0x32 - pobierz parametry mieszaczy."""
+        body = bytes([FRAME_GET_MIXER_PARAMS, count & 0xFF, start & 0xFF])
+        return FrameBuilder.create_frame(dest_addr, body)
+
+    @staticmethod
+    def request_service_parameters(dest_addr=ADDR_ECOMAX, start=0, count=255):
+        """Ramka 0x61 - pobierz parametry serwisowe."""
+        body = bytes([FRAME_GET_SERVICE_PARAMS, count & 0xFF, start & 0xFF])
+        return FrameBuilder.create_frame(dest_addr, body)
+
+    @staticmethod
+    def request_regdata_schema(dest_addr=ADDR_ECOMAX):
+        """Ramka 0x55 - pobierz schemat danych regulatora (ramka 0x08)."""
+        return FrameBuilder.create_frame(dest_addr, bytes([FRAME_GET_REGDATA_SCHEMA]))
+
+    @staticmethod
+    def set_boiler_control(dest_addr=ADDR_ECOMAX, value=0):
+        """Ramka 0x3B - wlacz (1) / wylacz (0) regulator kotla."""
+        body = bytes([FRAME_SET_BOILER_CONTROL, 1 if value else 0])
+        return FrameBuilder.create_frame(dest_addr, body)
+
+    @staticmethod
     def request_uid(dest_addr=ADDR_ECOMAX):
         """Ramka 0x39 - pobierz UID i model sterownika."""
         body = bytes([FRAME_GET_UID])
+        return FrameBuilder.create_frame(dest_addr, body)
+
+    @staticmethod
+    def request_alerts(dest_addr=ADDR_ECOMAX, start=0, count=10):
+        """Ramka 0x3D - pobierz historie alarmow (odpowiada panel ramka 0xBD)."""
+        body = bytes([FRAME_GET_ALARMS, start & 0xFF, count & 0xFF])
         return FrameBuilder.create_frame(dest_addr, body)
 
     @staticmethod

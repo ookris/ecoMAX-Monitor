@@ -28,6 +28,44 @@ _STAT_QUERIES = {
 }
 
 
+# Kolumny tabeli measurements zapisywane przez save_measurement (poza id).
+_MEASUREMENT_COLUMNS: tuple[str, ...] = (
+    'timestamp', 'temp_co', 'temp_feeder', 'temp_cwu',
+    'temp_external', 'temp_back', 'temp_flue_gas', 'temp_optical',
+    'temp_co_set', 'temp_cwu_set', 'fan_power', 'boiler_power',
+    'boiler_power_kw', 'fuel_level', 'fuel_stream',
+    'mode', 'mode_name', 'pump_co', 'pump_cwu', 'pump_circulation',
+    'flame', 'blower', 'fuel_burned_kg', 'ignitions',
+    'boiler_power_source',
+    'fan_on', 'feeder_on', 'lighter_on', 'alarm_output',
+    'thermostat_contact', 'heating_status', 'water_heater_status',
+    'pending_alerts_count',
+    'mixer1_temp', 'mixer1_target', 'mixer1_pump', 'mixer1_valve',
+)
+
+# Kolumny dodane po pierwszej wersji schematu: migracja addytywna (ALTER TABLE ADD COLUMN).
+_MEASUREMENT_ADDED_COLUMNS: dict[str, str] = {
+    'boiler_power_source': 'TEXT',
+    'fan_on': 'INTEGER',
+    'feeder_on': 'INTEGER',
+    'lighter_on': 'INTEGER',
+    'alarm_output': 'INTEGER',
+    'thermostat_contact': 'INTEGER',
+    'heating_status': 'INTEGER',
+    'water_heater_status': 'INTEGER',
+    'pending_alerts_count': 'INTEGER',
+    'mixer1_temp': 'REAL',
+    'mixer1_target': 'REAL',
+    'mixer1_pump': 'INTEGER',
+    'mixer1_valve': 'REAL',
+}
+
+_INSERT_MEASUREMENT_SQL = (
+    f"INSERT INTO measurements ({', '.join(_MEASUREMENT_COLUMNS)}) "  # noqa: S608
+    f"VALUES ({', '.join(':' + c for c in _MEASUREMENT_COLUMNS)})"
+)
+
+
 class Database:
     """Zarzadza baza SQLite z pomiarami."""
 
@@ -56,6 +94,8 @@ class Database:
         'alert_temp_flue_max':    '250',
         'alert_temp_co_min':      '30',
         'alert_fuel_level_min':   '15',
+        'fuel_level_not_set':     '0',
+        'boiler_nominal_power_kw': '',
         'alert_no_connection_min': '5',
         'alert_retention_mode':   'days',
         'alert_retention_days':   '30',
@@ -104,6 +144,7 @@ class Database:
                 ignitions INTEGER
             )
         """)
+        self._ensure_columns('measurements', _MEASUREMENT_ADDED_COLUMNS)
         self._conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_timestamp
             ON measurements(timestamp)
@@ -146,33 +187,71 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_boiler_setting_changes_timestamp
             ON boiler_setting_changes(timestamp DESC)
         """)
+        # Historia alarmow odczytana ze sterownika (0x3D/0xBD). Czas sterownika
+        # (lokalny) zapisany jako tekst + znacznik Unix wg strefy aplikacji.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS controller_alarms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code INTEGER NOT NULL,
+                start_text TEXT NOT NULL,
+                end_text TEXT,
+                start_ts REAL NOT NULL,
+                end_ts REAL,
+                first_seen REAL NOT NULL
+            )
+        """)
+        # Tozsamosc alarmu: kod + poczatek + koniec. Sterownik potrafi miec dwa alarmy
+        # o tym samym kodzie i poczatku (np. zaniki zasilania po resecie zegara).
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_controller_alarms_identity
+            ON controller_alarms(code, start_text)
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_controller_alarms_start
+            ON controller_alarms(start_ts DESC)
+        """)
+        # Analityka: dzienne liczniki (dzien lokalny, metryka) i zdarzenia zmiany trybu.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                day TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                value REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (day, metric)
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS mode_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                mode INTEGER NOT NULL,
+                previous_mode INTEGER
+            )
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_mode_events_timestamp
+            ON mode_events(timestamp)
+        """)
         self._conn.commit()
+
+    def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
+        """Dodaj brakujace kolumny (migracja addytywna istniejacych baz)."""
+        existing = {row['name'] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+        for name, col_type in columns.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
+                logger.info("Migracja bazy: dodano kolumne %s.%s", table, name)
 
     def save_measurement(self, data: dict[str, Any]) -> None:
         """Zapisz pomiar do bazy.
 
         Args:
-            data: BoilerData.to_dict() lub slownik z danymi
+            data: BoilerData.to_dict() lub slownik z danymi; brakujace klucze
+                zapisywane sa jako NULL.
         """
+        params = {column: data.get(column) for column in _MEASUREMENT_COLUMNS}
         with self._lock:
             try:
-                self._conn.execute("""
-                    INSERT INTO measurements (
-                        timestamp, temp_co, temp_feeder, temp_cwu,
-                        temp_external, temp_back, temp_flue_gas, temp_optical,
-                        temp_co_set, temp_cwu_set, fan_power, boiler_power,
-                        boiler_power_kw, fuel_level, fuel_stream,
-                        mode, mode_name, pump_co, pump_cwu, pump_circulation,
-                        flame, blower, fuel_burned_kg, ignitions
-                    ) VALUES (
-                        :timestamp, :temp_co, :temp_feeder, :temp_cwu,
-                        :temp_external, :temp_back, :temp_flue_gas, :temp_optical,
-                        :temp_co_set, :temp_cwu_set, :fan_power, :boiler_power,
-                        :boiler_power_kw, :fuel_level, :fuel_stream,
-                        :mode, :mode_name, :pump_co, :pump_cwu, :pump_circulation,
-                        :flame, :blower, :fuel_burned_kg, :ignitions
-                    )
-                """, data)
+                self._conn.execute(_INSERT_MEASUREMENT_SQL, params)
                 self._conn.commit()
             except sqlite3.Error as e:
                 logger.error("Blad zapisu do bazy: %s", e)
@@ -437,6 +516,8 @@ class Database:
                     "DELETE FROM measurements WHERE timestamp < ?",
                     (cutoff,)
                 )
+                # Zdarzenia trybu - ta sama retencja co pomiary; daily_stats (male) zostaja.
+                self._conn.execute("DELETE FROM mode_events WHERE timestamp < ?", (cutoff,))
                 self._conn.commit()
                 if result.rowcount > 0:
                     logger.info("Usunieto %d starych rekordow", result.rowcount)
@@ -495,10 +576,15 @@ class Database:
                 alerts_deleted = self._conn.execute(
                     "DELETE FROM alerts"
                 ).rowcount
+                self._conn.execute("DELETE FROM controller_alarms")
+                self._conn.execute("DELETE FROM daily_stats")
+                self._conn.execute("DELETE FROM mode_events")
+                # Po wyczyszczeniu historia alarmow zostanie zaimportowana ponownie bez alertow.
+                self._conn.execute("DELETE FROM config WHERE key = 'controller_alarms_imported'")
 
                 # Reset licznikow AUTOINCREMENT dla tabel runtime.
                 self._conn.execute(
-                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts')"
+                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts', 'controller_alarms', 'mode_events')"
                 )
                 self._conn.commit()
 
@@ -529,9 +615,12 @@ class Database:
                 config_deleted = self._conn.execute(
                     "DELETE FROM config"
                 ).rowcount
+                self._conn.execute("DELETE FROM controller_alarms")
+                self._conn.execute("DELETE FROM daily_stats")
+                self._conn.execute("DELETE FROM mode_events")
 
                 self._conn.execute(
-                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts')"
+                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts', 'controller_alarms', 'mode_events')"
                 )
                 self._conn.commit()
 
@@ -595,6 +684,193 @@ class Database:
             except sqlite3.Error as e:
                 logger.error("Blad zapisu historii zmian kotla: %s", e)
                 return False
+
+    def has_recent_boiler_change(
+        self,
+        *,
+        target_type: str,
+        param_index: int,
+        new_value: str,
+        since: float,
+    ) -> bool:
+        """Czy aplikacja zapisala niedawno (od `since`) dana wartosc parametru.
+
+        Uwzglednia tez zapisy bez potwierdzenia (timeout/blad polaczenia) - sterownik
+        mogl je zastosowac mimo utraty ACK.
+        """
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    """
+                    SELECT 1 FROM boiler_setting_changes
+                    WHERE target_type = ? AND param_index = ? AND new_value = ?
+                      AND status IN ('ok', 'timeout', 'connection_error')
+                      AND source != 'panel' AND timestamp >= ?
+                    LIMIT 1
+                    """,
+                    (target_type, param_index, new_value, since),
+                ).fetchone()
+                return row is not None
+            except sqlite3.Error as e:
+                logger.error("Blad odczytu historii zmian kotla: %s", e)
+                return False
+
+    def upsert_controller_alarm(
+        self,
+        *,
+        code: int,
+        start_text: str,
+        start_ts: float,
+        end_text: Optional[str],
+        end_ts: Optional[float],
+    ) -> str:
+        """Zapisz alarm sterownika. Zwraca 'new', 'updated' (trwajacy alarm sie zakonczyl)
+        lub 'unchanged'. Tozsamosc alarmu: kod + poczatek + koniec.
+        """
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, end_text FROM controller_alarms WHERE code = ? AND start_text = ?",
+                    (code, start_text),
+                ).fetchall()
+                if any(row['end_text'] == end_text for row in rows):
+                    return 'unchanged'
+                ongoing = next((row for row in rows if row['end_text'] is None), None)
+                if end_text is not None and ongoing is not None:
+                    self._conn.execute(
+                        "UPDATE controller_alarms SET end_text = ?, end_ts = ? WHERE id = ?",
+                        (end_text, end_ts, ongoing['id']),
+                    )
+                    self._conn.commit()
+                    return 'updated'
+                self._conn.execute(
+                    """
+                    INSERT INTO controller_alarms(code, start_text, end_text, start_ts, end_ts, first_seen)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (code, start_text, end_text, start_ts, end_ts, time.time()),
+                )
+                self._conn.commit()
+                return 'new'
+            except sqlite3.Error as e:
+                logger.error("Blad zapisu alarmu sterownika: %s", e)
+                return 'unchanged'
+
+    def oldest_ongoing_controller_alarm_ts(self) -> Optional[float]:
+        """Poczatek najstarszego alarmu bez konca (do decyzji o dalszym stronicowaniu)."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT MIN(start_ts) AS ts FROM controller_alarms WHERE end_ts IS NULL"
+                ).fetchone()
+                return row['ts'] if row and row['ts'] is not None else None
+            except sqlite3.Error as e:
+                logger.error("Blad odczytu alarmow sterownika: %s", e)
+                return None
+
+    def count_controller_alarms(self) -> int:
+        with self._lock:
+            try:
+                row = self._conn.execute("SELECT COUNT(*) AS total FROM controller_alarms").fetchone()
+                return int(row['total'] or 0)
+            except sqlite3.Error as e:
+                logger.error("Blad zliczania alarmow sterownika: %s", e)
+                return 0
+
+    def get_controller_alarms(
+        self,
+        limit: Optional[int] = 200,
+        since: Optional[float] = None,
+        until: Optional[float] = None,
+        code: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Alarmy sterownika (najnowsze pierwsze), opcjonalnie w zakresie czasu / dla kodu."""
+        clauses, params = [], []
+        if since is not None:
+            clauses.append("start_ts >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("start_ts < ?")
+            params.append(until)
+        if code is not None:
+            clauses.append("code = ?")
+            params.append(int(code))
+        query = "SELECT * FROM controller_alarms"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY start_ts DESC, id DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(min(max(int(limit), 1), 100000))
+        with self._lock:
+            try:
+                return [dict(r) for r in self._conn.execute(query, params).fetchall()]
+            except sqlite3.Error as e:
+                logger.error("Blad odczytu alarmow sterownika: %s", e)
+                return []
+
+    def add_daily_stats(self, increments: dict[tuple[str, str], float]) -> bool:
+        """Dodaj przyrosty metryk {(dzien, metryka): przyrost}. Zwraca False przy bledzie."""
+        if not increments:
+            return True
+        with self._lock:
+            try:
+                self._conn.executemany(
+                    """
+                    INSERT INTO daily_stats(day, metric, value) VALUES (?, ?, ?)
+                    ON CONFLICT(day, metric) DO UPDATE SET value = value + excluded.value
+                    """,
+                    [(day, metric, float(value)) for (day, metric), value in increments.items()],
+                )
+                self._conn.commit()
+                return True
+            except sqlite3.Error as e:
+                self._conn.rollback()
+                logger.error("Blad zapisu statystyk dziennych: %s", e)
+                return False
+
+    def get_daily_stats(self, since_day: str) -> dict[str, dict[str, float]]:
+        """Statystyki dzienne od `since_day` (YYYY-MM-DD): {dzien: {metryka: wartosc}}."""
+        result: dict[str, dict[str, float]] = {}
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT day, metric, value FROM daily_stats WHERE day >= ? ORDER BY day",
+                    (since_day,),
+                ).fetchall()
+            except sqlite3.Error as e:
+                logger.error("Blad odczytu statystyk dziennych: %s", e)
+                return result
+        for row in rows:
+            result.setdefault(row['day'], {})[row['metric']] = row['value']
+        return result
+
+    def add_mode_event(self, *, timestamp: float, mode: int, previous_mode: Optional[int]) -> bool:
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT INTO mode_events(timestamp, mode, previous_mode) VALUES (?, ?, ?)",
+                    (timestamp, mode, previous_mode),
+                )
+                self._conn.commit()
+                return True
+            except sqlite3.Error as e:
+                logger.error("Blad zapisu zdarzenia trybu: %s", e)
+                return False
+
+    def get_mode_events(self, since: float, until: Optional[float] = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM mode_events WHERE timestamp >= ?"
+        params: list[Any] = [since]
+        if until is not None:
+            query += " AND timestamp < ?"
+            params.append(until)
+        query += " ORDER BY timestamp ASC"
+        with self._lock:
+            try:
+                return [dict(r) for r in self._conn.execute(query, params).fetchall()]
+            except sqlite3.Error as e:
+                logger.error("Blad odczytu zdarzen trybu: %s", e)
+                return []
 
     def get_boiler_setting_changes(self, limit: int = 100) -> list[dict[str, Any]]:
         """Pobierz historię zmian ustawień kotła (najnowsze pierwsze)."""

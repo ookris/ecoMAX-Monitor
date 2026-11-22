@@ -105,6 +105,12 @@ function applyParameterViewMode() {
         section.classList.toggle('is-hidden-by-profile', neededRank > currentRank);
     });
 
+    // Sekcje instalatora (mieszacze, parametry sterownika) odpytują sterownik - ładuj je
+    // dopiero, gdy profil je pokazuje.
+    if ((profileRank[parameterProfile] || 0) >= profileRank.installer) {
+        ensureInstallerSectionsLoaded();
+    }
+
     const servicePanel = document.getElementById('boiler-service-access');
     const clearBtn = document.getElementById('btn-service-clear');
     if (servicePanel) {
@@ -246,6 +252,39 @@ function buildSelectOptions(param, minValue, maxValue) {
     return options;
 }
 
+// Wartość wyświetlana = (surowa - display_offset) * scale; sterownik operuje na wartościach surowych.
+function paramScale(param) {
+    const scale = Number(param.scale);
+    return Number.isFinite(scale) && scale > 0 ? scale : 1;
+}
+
+function paramOffset(param) {
+    const offset = Number(param.display_offset);
+    return Number.isFinite(offset) ? offset : 0;
+}
+
+function paramDecimals(param) {
+    const scale = paramScale(param);
+    if (scale >= 1) return 0;
+    return Math.min(3, Math.max(0, Math.ceil(-Math.log10(scale) - 1e-9)));
+}
+
+function rawToDisplay(param, raw) {
+    const value = (Number(raw) - paramOffset(param)) * paramScale(param);
+    return Number(value.toFixed(paramDecimals(param)));
+}
+
+function displayToRaw(param, display) {
+    return Math.round(Number(display) / paramScale(param)) + paramOffset(param);
+}
+
+function formatDisplayNumber(param, raw) {
+    return rawToDisplay(param, raw).toLocaleString('pl-PL', {
+        minimumFractionDigits: paramDecimals(param),
+        maximumFractionDigits: paramDecimals(param),
+    });
+}
+
 function valueToText(param, value) {
     if (value === null || value === undefined) return '--';
     const intValue = parseInt(String(value), 10);
@@ -256,8 +295,9 @@ function valueToText(param, value) {
         if (mapped) return mapped;
     }
 
-    if (param.unit) return `${intValue} ${param.unit}`;
-    return String(intValue);
+    const text = formatDisplayNumber(param, intValue);
+    if (param.unit) return `${text} ${param.unit}`;
+    return text;
 }
 
 function renderParameterCard(param) {
@@ -320,11 +360,11 @@ function renderParameterCard(param) {
         inputEl = document.createElement('input');
         inputEl.id = `param-${param.key}`;
         inputEl.type = 'number';
-        inputEl.min = String(param.min_value);
-        inputEl.max = String(param.max_value);
-        inputEl.step = String(param.step || 1);
+        inputEl.min = String(rawToDisplay(param, param.min_value));
+        inputEl.max = String(rawToDisplay(param, param.max_value));
+        inputEl.step = String(Number(((param.step || 1) * paramScale(param)).toFixed(paramDecimals(param))));
         if (param.current_value !== null && param.current_value !== undefined) {
-            inputEl.value = String(param.current_value);
+            inputEl.value = String(rawToDisplay(param, param.current_value));
         }
     }
     wrapper.appendChild(inputEl);
@@ -332,7 +372,9 @@ function renderParameterCard(param) {
     const rangeHint = document.createElement('span');
     rangeHint.className = 'settings-hint';
     const unit = param.unit ? ` ${param.unit}` : '';
-    rangeHint.textContent = `Zakres: ${param.min_value} - ${param.max_value}${unit}`;
+    rangeHint.textContent = param.value_map
+        ? `Zakres: ${param.min_value} - ${param.max_value}${unit}`
+        : `Zakres: ${formatDisplayNumber(param, param.min_value)} – ${formatDisplayNumber(param, param.max_value)}${unit}`;
     wrapper.appendChild(rangeHint);
 
     const btn = document.createElement('button');
@@ -346,24 +388,36 @@ function renderParameterCard(param) {
 }
 
 async function setParameter(param, inputEl, currentEl) {
-    const rawValue = inputEl.value;
-    const value = parseInt(rawValue, 10);
+    const rawText = String(inputEl.value || '').trim().replace(',', '.');
+    const isSelect = inputEl.tagName === 'SELECT';
+    const parsed = isSelect ? parseInt(rawText, 10) : Number(rawText);
 
-    if (Number.isNaN(value)) {
+    if (rawText === '' || !Number.isFinite(parsed)) {
         showBoilerControlMsg('Podaj poprawną wartość liczbową.', 'error');
         return;
     }
 
+    const value = isSelect ? parsed : displayToRaw(param, parsed);
     if (value < param.min_value || value > param.max_value) {
-        showBoilerControlMsg(`Wartość poza zakresem ${param.min_value}-${param.max_value}.`, 'error');
+        const range = isSelect
+            ? `${param.min_value}-${param.max_value}`
+            : `${formatDisplayNumber(param, param.min_value)} – ${formatDisplayNumber(param, param.max_value)}`;
+        showBoilerControlMsg(`Wartość poza zakresem ${range}.`, 'error');
         return;
+    }
+
+    const body = { key: param.api_key || param.key, value };
+    if (param.target_type) {
+        body.target_type = param.target_type;
+        body.target_index = param.target_index;
+        body.index = param.index;
     }
 
     try {
         const resp = await fetch('/api/boiler-control/set-parameter', {
             method: 'POST',
             headers: buildControlHeaders(),
-            body: JSON.stringify({ key: param.key, value }),
+            body: JSON.stringify(body),
         });
 
         const json = await resp.json();
@@ -374,6 +428,7 @@ async function setParameter(param, inputEl, currentEl) {
 
         currentEl.textContent = `Aktualna wartość: ${valueToText(param, json.data.value)}`;
         showBoilerControlMsg(`Zapisano: ${param.label} = ${valueToText(param, json.data.value)}`, 'ok');
+        loadBoilerControlHistory();
     } catch (e) {
         showBoilerControlMsg('Błąd komunikacji: ' + e.message, 'error');
     }
@@ -440,7 +495,9 @@ async function loadBoilerControlHistory() {
         }
 
         for (const row of json.data) {
-            const target = `${row.target_type || '--'}${row.target_index !== null && row.target_index !== undefined ? `:${row.target_index}` : ''}`;
+            const targetIndex = row.target_index !== null && row.target_index !== undefined ? `:${row.target_index}` : '';
+            const sourceLabel = row.source === 'panel' ? ' · zmiana na panelu' : '';
+            const target = `${row.target_type || '--'}${targetIndex}${sourceLabel}`;
             const change = `${row.old_value ?? '--'} → ${row.new_value ?? '--'}`;
             const tr = document.createElement('tr');
 
@@ -627,18 +684,24 @@ function updateScheduleParameterUI(scheduleType) {
 
     // Znajdź type_name dla wybranego numeru
     const typeInfo = (scheduleStore.knownTypes || []).find((t) => t.type === scheduleType);
-    const typeName = typeInfo?.type_name || null;
-    const paramLabel = typeName !== null ? scheduleParameterLabels[typeName] : undefined;
-    const supported = paramLabel !== null && paramLabel !== undefined;
+    const typeName = typeInfo?.type_name ?? null;
+    const mappedLabel = typeName !== null ? scheduleParameterLabels[typeName] : null;
+    // null = jawnie nie obsługuje parametru; undefined = nieznany typ (pole włączone)
+    const supported = mappedLabel !== null;
+    const effectiveLabel = mappedLabel ?? 'Parametr harmonogramu';
 
-    if (labelEl) labelEl.textContent = supported ? paramLabel : 'Parametr harmonogramu';
+    if (labelEl) labelEl.textContent = effectiveLabel;
     inputEl.disabled = !supported;
     inputEl.style.opacity = supported ? '' : '0.45';
+    if (!supported) {
+        inputEl.value = '0';
+    }
     if (rangeEl) {
         if (!supported) {
             rangeEl.textContent = 'Ten typ harmonogramu nie obsługuje parametru.';
+        } else {
+            rangeEl.textContent = '';  // applyScheduleToForm uzupełni zakres
         }
-        // Zakres aktualizuje applyScheduleToForm na podstawie danych z kotła
     }
 }
 
@@ -941,16 +1004,23 @@ async function saveScheduleSemantic() {
 
     const switchEl = document.getElementById('schedule_switch');
     const parameterEl = document.getElementById('schedule_parameter');
-    const parameter = parseInt(parameterEl?.value || '', 10);
-    if (Number.isNaN(parameter)) {
-        showBoilerControlMsg('Parametr harmonogramu musi być liczbą całkowitą.', 'error');
-        return;
-    }
 
-    const rangeError = validateParameterRangeAgainstCurrentSchedule(parameter);
-    if (rangeError) {
-        showBoilerControlMsg(rangeError, 'error');
-        return;
+    let parameter;
+    if (parameterEl?.disabled) {
+        // Typ nie obsługuje parametru — wyślij bieżącą wartość z kotła lub 0
+        const current = scheduleStore.schedulesByType.get(scheduleType);
+        parameter = current?.parameter?.value ?? 0;
+    } else {
+        parameter = parseInt(parameterEl?.value || '', 10);
+        if (Number.isNaN(parameter)) {
+            showBoilerControlMsg('Parametr harmonogramu musi być liczbą całkowitą.', 'error');
+            return;
+        }
+        const rangeError = validateParameterRangeAgainstCurrentSchedule(parameter);
+        if (rangeError) {
+            showBoilerControlMsg(rangeError, 'error');
+            return;
+        }
     }
 
     const days = getScheduleDaysFromGrid();
@@ -1003,6 +1073,250 @@ function onScheduleTypeChanged() {
 
 window.clearScheduleGrid = clearScheduleGrid;
 
+let installerSectionsLoaded = false;
+
+function ensureInstallerSectionsLoaded() {
+    if (installerSectionsLoaded) return;
+    installerSectionsLoaded = true;
+    loadMixers();
+    loadControllerParams();
+}
+
+// ---- Kocioł i urządzenie ----
+
+function appendInfo(list, label, value) {
+    const dt = document.createElement('dt');
+    dt.textContent = label;
+    const dd = document.createElement('dd');
+    dd.textContent = (value === null || value === undefined || value === '') ? '--' : String(value);
+    list.appendChild(dt);
+    list.appendChild(dd);
+}
+
+async function loadDeviceInfo() {
+    const list = document.getElementById('device-info');
+    if (!list) return;
+    try {
+        const resp = await fetch('/api/boiler-control/device-info', { headers: buildControlHeaders() });
+        const json = await resp.json();
+        list.textContent = '';
+        if (json.status !== 'ok') {
+            appendInfo(list, 'Stan', json.message || 'Brak danych');
+            return;
+        }
+        const d = json.data || {};
+        const modules = d.modules || {};
+        appendInfo(list, 'Tryb pracy', d.mode_name);
+        appendInfo(list, 'Model', d.model);
+        appendInfo(list, 'UID (ecoNET)', d.uid);
+        appendInfo(list, 'Moduł A', modules.module_a);
+        appendInfo(list, 'Panel', modules.module_panel);
+        if (modules.module_b) appendInfo(list, 'Moduł B', modules.module_b);
+        if (modules.module_c) appendInfo(list, 'Moduł C', modules.module_c);
+        if (modules.module_ecolambda) appendInfo(list, 'ecoLAMBDA', modules.module_ecolambda);
+        if (modules.module_ecoster) appendInfo(list, 'ecoSTER', modules.module_ecoster);
+        appendInfo(list, 'Mieszacze (podłączone/dostępne)', `${d.mixers_connected ?? 0} / ${d.mixers_available ?? 0}`);
+        appendInfo(list, 'Termostaty (podłączone/dostępne)', `${d.thermostats_connected ?? 0} / ${d.thermostats_available ?? 0}`);
+        if (d.uid_error) appendInfo(list, 'UID – błąd', d.uid_error);
+    } catch (e) {
+        list.textContent = '';
+        appendInfo(list, 'Stan', 'Błąd: ' + e.message);
+    }
+}
+
+async function setBoilerPower(enabled) {
+    const question = enabled
+        ? 'Włączyć kocioł? Sterownik rozpocznie pracę zgodnie z nastawami.'
+        : 'Wyłączyć kocioł? Sterownik przejdzie w tryb wyłączenia (wygaszanie/postój).';
+    if (!confirm(question)) return;
+    try {
+        const resp = await fetch('/api/boiler-control/power', {
+            method: 'POST',
+            headers: buildControlHeaders(),
+            body: JSON.stringify({ enabled }),
+        });
+        const json = await resp.json();
+        if (json.status !== 'ok') {
+            showBoilerControlMsg(json.message || 'Nie udało się zmienić stanu kotła.', 'error');
+            return;
+        }
+        showBoilerControlMsg(json.message, 'ok');
+        loadBoilerControlHistory();
+        setTimeout(loadDeviceInfo, 5000);
+    } catch (e) {
+        showBoilerControlMsg('Błąd komunikacji: ' + e.message, 'error');
+    }
+}
+
+// ---- Mieszacze ----
+
+function mixerParamToCard(mixer, p) {
+    return {
+        key: `${p.key}_M${mixer.index}`,
+        api_key: p.key,
+        label: p.label,
+        group: mixer.name,
+        description: '',
+        ui_profile: 'installer',
+        widget: p.widget,
+        value_map: p.value_map,
+        min_value: p.min_value,
+        max_value: p.max_value,
+        step: 1,
+        scale: p.scale,
+        display_offset: p.display_offset,
+        unit: p.unit,
+        current_value: p.value,
+        available: p.available,
+        target_type: 'mixer',
+        target_index: mixer.index,
+        index: p.index,
+    };
+}
+
+async function loadMixers(force = false) {
+    const container = document.getElementById('mixers-list');
+    if (!container) return;
+    try {
+        const resp = await fetch('/api/boiler-control/mixers' + (force ? '?refresh=1' : ''), { headers: buildControlHeaders() });
+        const json = await resp.json();
+        container.textContent = '';
+        if (json.status !== 'ok') {
+            const p = document.createElement('p');
+            p.className = 'settings-hint';
+            p.textContent = json.message || 'Nie udało się pobrać parametrów mieszaczy.';
+            container.appendChild(p);
+            return;
+        }
+        if (!json.data.length) {
+            const p = document.createElement('p');
+            p.className = 'settings-hint';
+            p.textContent = 'Sterownik nie raportuje skonfigurowanych mieszaczy.';
+            container.appendChild(p);
+            return;
+        }
+        for (const mixer of json.data) {
+            const head = document.createElement('h3');
+            const live = mixer.live || {};
+            const liveText = mixer.connected
+                ? ` – ${Number(live.current_temp).toFixed(1)} °C (zadana ${live.target_temp ?? '--'} °C, zawór ${live.valve_position ?? '--'}%)`
+                : ' – czujnik niepodłączony';
+            head.textContent = mixer.name + liveText;
+            container.appendChild(head);
+            const grid = document.createElement('div');
+            grid.className = 'settings-grid control-grid';
+            for (const p of mixer.parameters.filter((param) => param.available)) {
+                grid.appendChild(renderParameterCard(mixerParamToCard(mixer, p)));
+            }
+            container.appendChild(grid);
+        }
+    } catch (e) {
+        container.textContent = 'Błąd: ' + e.message;
+    }
+}
+
+// ---- Parametry pracy sterownika (odczyt) ----
+
+let controllerParamsRows = [];
+
+function paramDisplayText(row, raw) {
+    if (raw === null || raw === undefined) return '--';
+    const text = formatDisplayNumber(row, raw);
+    return row.unit ? `${text} ${row.unit}` : text;
+}
+
+function renderControllerParams() {
+    const body = document.getElementById('controller-params-body');
+    const groupEl = document.getElementById('controller-params-group');
+    if (!body) return;
+    const group = groupEl ? groupEl.value : 'all';
+    body.textContent = '';
+    const rows = controllerParamsRows.filter((r) => group === 'all' || r.group === group);
+    for (const row of rows) {
+        const tr = document.createElement('tr');
+        const cells = [
+            row.group,
+            String(row.index),
+            row.label + (row.editable_in_catalog ? ' ✎' : ''),
+            paramDisplayText(row, row.value),
+            `${paramDisplayText(row, row.min_value)} – ${paramDisplayText(row, row.max_value)}`,
+        ];
+        for (const text of cells) {
+            const td = document.createElement('td');
+            td.textContent = text;
+            tr.appendChild(td);
+        }
+        body.appendChild(tr);
+    }
+}
+
+async function loadControllerParams() {
+    const body = document.getElementById('controller-params-body');
+    const groupEl = document.getElementById('controller-params-group');
+    if (!body) return;
+    try {
+        const resp = await fetch('/api/boiler-control/controller-parameters');
+        const json = await resp.json();
+        if (json.status !== 'ok') {
+            body.innerHTML = '';
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 5;
+            td.className = 'parameters-empty';
+            td.textContent = json.message || 'Brak danych ze sterownika.';
+            tr.appendChild(td);
+            body.appendChild(tr);
+            return;
+        }
+        controllerParamsRows = json.data;
+        if (groupEl && groupEl.options.length <= 1) {
+            for (const group of [...new Set(controllerParamsRows.map((r) => r.group))]) {
+                const option = document.createElement('option');
+                option.value = group;
+                option.textContent = group;
+                groupEl.appendChild(option);
+            }
+        }
+        renderControllerParams();
+    } catch (e) {
+        body.textContent = 'Błąd: ' + e.message;
+    }
+}
+
+async function loadServiceParameters() {
+    const body = document.getElementById('service-params-body');
+    if (!body) return;
+    try {
+        const resp = await fetch('/api/boiler-control/service-parameters', { headers: buildControlHeaders() });
+        const json = await resp.json();
+        body.textContent = '';
+        if (json.status !== 'ok' || !json.data.length) {
+            const message = json.status !== 'ok'
+                ? (json.message || 'Nie udało się odczytać parametrów serwisowych.')
+                : 'Sterownik nie zwrócił parametrów serwisowych.';
+            const tr = document.createElement('tr');
+            const td = document.createElement('td');
+            td.colSpan = 4;
+            td.className = 'parameters-empty';
+            td.textContent = message;
+            tr.appendChild(td);
+            body.appendChild(tr);
+            return;
+        }
+        for (const row of json.data) {
+            const tr = document.createElement('tr');
+            for (const text of [row.index, row.value, row.min_value, row.max_value]) {
+                const td = document.createElement('td');
+                td.textContent = String(text ?? '--');
+                tr.appendChild(td);
+            }
+            body.appendChild(tr);
+        }
+    } catch (e) {
+        showBoilerControlMsg('Błąd komunikacji: ' + e.message, 'error');
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
     parameterProfile = normalizeProfile(getModeFromStorage());
     setupParameterViewModeControls();
@@ -1010,6 +1324,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
     loadBoilerControlParameters();
     loadBoilerControlHistory();
+    loadDeviceInfo();
+    const groupEl = document.getElementById('controller-params-group');
+    if (groupEl) groupEl.addEventListener('change', renderControllerParams);
     ensureScheduleGridBuilt();
     refreshServiceAccessState(false);
 

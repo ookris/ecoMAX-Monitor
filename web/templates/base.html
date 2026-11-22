@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}ecoMAX Monitor{% endblock %}</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
+    <script>
+        // Zastosuj motyw przed renderowaniem (zapobiega miganiu)
+        (function () { if (localStorage.getItem('theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); })();
+    </script>
+    <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
+    {% block head_extra %}{% endblock %}
+</head>
+<body>
+    <div class="app-shell">
+        <aside class="sidebar" id="sidebar" aria-label="Nawigacja aplikacji">
+            <a href="/" class="brand-link">
+                <img src="/static/img/logo.svg?v={{ asset_version }}" alt="" class="brand-logo">
+                <span class="brand-text">
+                    <span class="brand-name">ecoMAX Monitor</span>
+                    <span class="brand-sub">Kotłownia</span>
+                </span>
+            </a>
+
+            {% set nav_items = [
+                ('Monitoring', [
+                    ('dashboard', '/', 'mdi:view-dashboard-outline', 'Panel główny'),
+                    ('analysis', '/analysis', 'mdi:chart-timeline-variant', 'Analiza'),
+                    ('parameters', '/parameters', 'mdi:table-large', 'Parametry'),
+                ]),
+                ('Kocioł', [
+                    ('boiler-control', '/boiler-control', 'mdi:tune-variant', 'Sterowanie'),
+                    ('alerts', '/alerts', 'mdi:bell-outline', 'Alerty'),
+                ]),
+                ('System', [
+                    ('logs', '/logs', 'mdi:text-box-outline', 'Logi'),
+                    ('settings', '/settings', 'mdi:cog-outline', 'Ustawienia'),
+                ]),
+            ] %}
+
+            <nav class="nav">
+                {% for group_label, items in nav_items %}
+                <div class="nav-group">
+                    <div class="nav-group-label">{{ group_label }}</div>
+                    {% for key, href, icon, label in items %}
+                    <a href="{{ href }}" class="nav-link{% if active_page == key %} active{% endif %}"{% if active_page == key %} aria-current="page"{% endif %}>
+                        <iconify-icon icon="{{ icon }}"></iconify-icon>
+                        <span>{{ label }}</span>
+                    </a>
+                    {% endfor %}
+                </div>
+                {% endfor %}
+            </nav>
+
+            <div class="sidebar-foot">
+                <button id="btn-theme" class="btn-theme" type="button" onclick="toggleTheme()" title="Przełącz na tryb ciemny" aria-label="Przełącz na tryb ciemny">
+                    <iconify-icon icon="mdi:weather-night"></iconify-icon>
+                </button>
+                <span class="sidebar-version">v{{ asset_version }}</span>
+            </div>
+        </aside>
+        <div class="sidebar-scrim" data-sidebar-close></div>
+
+        <div class="app-main">
+            <header class="topbar">
+                <button class="btn-icon nav-toggle" type="button" data-sidebar-toggle aria-controls="sidebar" aria-expanded="false" aria-label="Pokaż menu">
+                    <iconify-icon icon="mdi:menu"></iconify-icon>
+                </button>
+                <div class="topbar-title">
+                    <h1>{% block page_title %}{% endblock %}</h1>
+                    {% block page_subtitle %}{% endblock %}
+                </div>
+                <div class="topbar-actions">
+                    {% block page_actions %}{% endblock %}
+                    {% if show_connection %}
+                    <div id="connection-status" class="status disconnected" role="status">
+                        <span class="dot"></span>
+                        <span id="status-text">Rozłączony</span>
+                    </div>
+                    {% endif %}
+                </div>
+            </header>
+
+            <main class="{% block main_class %}page{% endblock %}">
+                {% block content %}{% endblock %}
+            </main>
+        </div>
+    </div>
+
+    {% block scripts %}{% endblock %}
+    <script src="/static/js/nav.js?v={{ asset_version }}"></script>
+    <script src="/static/js/theme.js?v={{ asset_version }}"></script>
+</body>
+</html>

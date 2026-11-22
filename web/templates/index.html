@@ -1,288 +1,281 @@
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ecoMAX Monitor</title>
-    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
-    <script>
-        // Zastosuj motyw przed renderowaniem (zapobiega miganiu)
-        (function () { if (localStorage.getItem('theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); })();
-    </script>
-    <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-</head>
-<body>
-    <header>
-        <h1><a href="/" class="brand-link"><img src="/static/img/logo.svg?v={{ asset_version }}" alt="" class="brand-logo">ecoMAX Monitor</a></h1>
-        <div class="header-actions">
-            <div id="connection-status" class="status disconnected">
-                <span class="dot"></span>
-                <span id="status-text">Rozłączony</span>
+{% extends 'base.html' %}
+{% set active_page = 'dashboard' %}
+{% set show_connection = true %}
+
+{% block title %}ecoMAX Monitor{% endblock %}
+{% block page_title %}Panel główny{% endblock %}
+
+{% block content %}
+    <!-- Baner pierwszej konfiguracji -->
+    <div id="setup-banner" class="setup-banner" style="display:none">
+        <span><iconify-icon icon="mdi:alert-outline"></iconify-icon> Aplikacja nie jest skonfigurowana. Podaj adres modułu EW11A, aby zacząć odczyt danych.</span>
+        <a href="/settings" class="setup-banner-link">Przejdź do ustawień</a>
+    </div>
+
+    <!-- Baner problemu uruchamiania po restarcie -->
+    <div id="startup-banner" class="alert-banner" style="display:none">
+        <div>
+            <span id="startup-banner-text"></span>
+            <div id="startup-banner-help" class="banner-help" style="display:none">
+                Diagnostyka: <a href="/logs">otwórz logi aplikacji</a><br>
+                SSH: <code>systemctl status ecomax-monitor.service --no-pager -l</code><br>
+                SSH: <code>journalctl -u ecomax-monitor.service -n 120 --no-pager -l</code>
             </div>
-            <button id="btn-theme" class="btn-theme" onclick="toggleTheme()" title="Przełącz na tryb ciemny"><iconify-icon icon="mdi:weather-night"></iconify-icon></button>
-            {% set active_page = 'dashboard' %}
-            {% include '_menu_dropdown.html' %}
         </div>
-    </header>
+        <button class="alert-dismiss" onclick="dismissStartupBanner()" aria-label="Zamknij"><iconify-icon icon="mdi:close"></iconify-icon></button>
+    </div>
 
-    <main>
-        <!-- Baner pierwszej konfiguracji -->
-        <div id="setup-banner" class="setup-banner" style="display:none">
-            <span><iconify-icon icon="mdi:alert"></iconify-icon> Aplikacja nie jest skonfigurowana. Skonfiguruj połączenie z EW11A przed użyciem.</span>
-            <a href="/settings" class="setup-banner-link"><iconify-icon icon="mdi:arrow-right"></iconify-icon> Ustawienia</a>
-        </div>
+    <!-- Baner alertów -->
+    <div id="alert-banner" class="alert-banner" style="display:none">
+        <span id="alert-banner-text"></span>
+        <button class="alert-dismiss" onclick="dismissAlerts()" aria-label="Zamknij"><iconify-icon icon="mdi:close"></iconify-icon></button>
+    </div>
 
-        <!-- Baner problemu uruchamiania po restarcie -->
-        <div id="startup-banner" class="alert-banner" style="display:none">
+    <!-- Stan kotła -->
+    <section class="status-strip mode-card" aria-label="Stan kotła">
+        <div class="status-mode">
+            <span class="status-mode-lamp" aria-hidden="true"></span>
             <div>
-                <span id="startup-banner-text"></span>
-                <div id="startup-banner-help" style="display:none; margin-top:6px; font-weight:400; font-size:0.92rem; line-height:1.4;">
-                    Diagnostyka: <a href="/logs" style="color:inherit; text-decoration:underline;">otwórz logi aplikacji</a><br>
-                    SSH: <code>systemctl status ecomax-monitor.service --no-pager -l</code><br>
-                    SSH: <code>journalctl -u ecomax-monitor.service -n 120 --no-pager -l</code>
-                </div>
+                <div class="status-caption">Tryb pracy</div>
+                <div id="mode-name" class="mode-value">---</div>
+                <div id="pending-alarms" class="pending-alarms" style="display:none"><a href="/alerts#controller-alarms-section"></a></div>
             </div>
-            <button class="alert-dismiss" onclick="dismissStartupBanner()"><iconify-icon icon="mdi:close"></iconify-icon></button>
         </div>
 
-        <!-- Baner alertów -->
-        <div id="alert-banner" class="alert-banner" style="display:none">
-            <span id="alert-banner-text"></span>
-            <button class="alert-dismiss" onclick="dismissAlerts()"><iconify-icon icon="mdi:close"></iconify-icon></button>
+        <div class="status-pumps pumps-grid" aria-label="Pompy">
+            <div class="pump-indicator" id="pump-co">
+                <span class="pump-dot off"></span><span>Pompa CO</span>
+            </div>
+            <div class="pump-indicator" id="pump-cwu">
+                <span class="pump-dot off"></span><span>Pompa CWU</span>
+            </div>
+            <div class="pump-indicator" id="pump-circ">
+                <span class="pump-dot off"></span><span>Cyrkulacja</span>
+            </div>
+            <div class="pump-indicator" id="out-fan" title="Wentylator nadmuchu">
+                <span class="pump-dot off"></span><span>Wentylator</span>
+            </div>
+            <div class="pump-indicator" id="out-feeder" title="Podajnik pracuje impulsowo - stan odświeżany co kilka sekund">
+                <span class="pump-dot off"></span><span>Podajnik</span>
+            </div>
+            <div class="pump-indicator" id="out-lighter" title="Zapalarka (grzałka rozpalania)">
+                <span class="pump-dot off"></span><span>Zapalarka</span>
+            </div>
         </div>
 
-        <div class="top-widgets-row">
-            <!-- Tryb pracy -->
-            <section class="mode-section">
-                <div class="mode-card">
-                    <div class="mode-main">
-                        <span class="mode-label">Tryb pracy:</span>
-                        <span id="mode-name" class="mode-value">---</span>
-                    </div>
-                    <div class="mode-datetime" aria-label="Czas serwera">
-                        <div id="mode-time" class="mode-time">--:--</div>
-                        <div id="mode-date" class="mode-date">--.--.----</div>
-                    </div>
-                </div>
-            </section>
+        <div class="mode-datetime" aria-label="Czas sterownika">
+            <div id="mode-time" class="mode-time">--:--</div>
+            <div id="mode-date" class="mode-date">--.--.----</div>
+        </div>
+    </section>
 
-            <section class="weather-section">
-                <div class="weather-card" id="weather-card">
-                    <div class="weather-main">
-                        <iconify-icon id="weather-icon" icon="mdi:weather-cloudy" class="weather-icon" width="2em" height="2em"></iconify-icon>
-                        <div>
-                            <div class="weather-temp"><span id="weather-temp">--</span> <small>°C</small></div>
-                            <div class="weather-desc" id="weather-desc">Pogoda</div>
-                        </div>
-                    </div>
-                    <div class="weather-location" id="weather-location">
-                        <div class="weather-location-locality" id="weather-location-locality">Ustaw miejscowość</div>
-                        <div class="weather-location-admin" id="weather-location-admin">w Ustawieniach</div>
-                    </div>
-                </div>
-            </section>
+    <!-- Alerty -->
+    <section id="alerts-section" class="panel alerts-section" style="display:none">
+        <div class="panel-head">
+            <h2>Ostatnie alerty <span id="alerts-count" class="alerts-badge"></span></h2>
+            <a href="/alerts" class="btn-ghost">Wszystkie alerty</a>
+        </div>
+        <div id="alerts-list" class="alerts-list alerts-list-visible"></div>
+    </section>
+
+    <!-- Obiegi główne + pogoda -->
+    <section class="circuits">
+        <article class="tile tile-circuit tone-heat" id="tile-temp-co">
+            <div class="tile-head">
+                <iconify-icon icon="mdi:radiator" class="tile-icon"></iconify-icon>
+                <span class="tile-label">Zasilanie CO</span>
+            </div>
+            <div class="tile-value"><span id="val-temp-co">--</span><small>°C</small></div>
+            <div class="gauge" aria-hidden="true">
+                <div class="gauge-fill" id="gauge-temp-co"></div>
+                <div class="gauge-target" id="gauge-temp-co-target"></div>
+            </div>
+            <div class="tile-set">Zadana <strong><span id="val-temp-co-set">--</span> °C</strong></div>
+            <div class="tile-stats" id="tile-stats-temp-co"><span>min <b>--</b></span><span>max <b>--</b></span><span>śr. <b>--</b></span></div>
+        </article>
+
+        <article class="tile tile-circuit tone-water" id="tile-temp-cwu">
+            <div class="tile-head">
+                <iconify-icon icon="mdi:water-boiler" class="tile-icon"></iconify-icon>
+                <span class="tile-label">Ciepła woda (CWU)</span>
+            </div>
+            <div class="tile-value"><span id="val-temp-cwu">--</span><small>°C</small></div>
+            <div class="gauge" aria-hidden="true">
+                <div class="gauge-fill" id="gauge-temp-cwu"></div>
+                <div class="gauge-target" id="gauge-temp-cwu-target"></div>
+            </div>
+            <div class="tile-set">Zadana <strong><span id="val-temp-cwu-set">--</span> °C</strong></div>
+            <div class="tile-stats" id="tile-stats-temp-cwu"><span>min <b>--</b></span><span>max <b>--</b></span><span>śr. <b>--</b></span></div>
+        </article>
+
+        <article class="weather-card" id="weather-card">
+            <div class="tile-head">
+                <iconify-icon icon="mdi:map-marker-outline" class="tile-icon"></iconify-icon>
+                <span class="weather-location">
+                    <span class="weather-location-locality" id="weather-location-locality">Ustaw lokalizację</span>
+                    <span class="weather-location-admin" id="weather-location-admin">w ustawieniach</span>
+                </span>
+            </div>
+            <div class="weather-main">
+                <iconify-icon id="weather-icon" icon="mdi:weather-cloudy" class="weather-icon"></iconify-icon>
+                <div class="weather-temp"><span id="weather-temp">--</span><small>°C</small></div>
+            </div>
+            <div class="weather-desc" id="weather-desc">Pogoda</div>
+        </article>
+    </section>
+
+    <!-- Pomiary -->
+    <section class="tiles-grid" aria-label="Pomiary">
+        <div class="tile" id="tile-temp-back">
+            <div class="tile-head"><iconify-icon icon="mdi:thermometer-chevron-down" class="tile-icon"></iconify-icon><span class="tile-label">Powrót</span></div>
+            <div class="tile-value"><span id="val-temp-back">--</span><small>°C</small></div>
+            <div class="tile-stats" id="tile-stats-temp-back"><span>min <b>--</b></span><span>max <b>--</b></span><span>śr. <b>--</b></span></div>
         </div>
 
-        <!-- Historia alertów -->
-        <section id="alerts-section" class="alerts-section" style="display:none">
-            <h2>
-                Alerty <span id="alerts-count" class="alerts-badge"></span>
-            </h2>
-            <div class="alerts-section-actions">
-                <a href="/alerts" class="btn-nav btn-alerts-link"><iconify-icon icon="mdi:format-list-bulleted"></iconify-icon> Wszystkie alerty</a>
-            </div>
-            <div id="alerts-list" class="alerts-list alerts-list-visible"></div>
-        </section>
+        <div class="tile" id="tile-efficiency">
+            <div class="tile-head"><iconify-icon icon="mdi:delta" class="tile-icon"></iconify-icon><span class="tile-label">Różnica CO–powrót</span></div>
+            <div class="tile-value"><span id="val-efficiency">--</span><small>°C</small></div>
+            <div class="tile-set">Sprawność obiegu</div>
+        </div>
 
-        <!-- Kafelki główne -->
-        <section class="tiles-grid">
-            <div class="tile tile-temp" id="tile-temp-co">
-                <div class="tile-icon"><iconify-icon icon="mdi:thermometer"></iconify-icon></div>
-                <div class="tile-label">Temp. CO (zasilanie)</div>
-                <div class="tile-value"><span id="val-temp-co">--</span> <small>°C</small></div>
-                <div class="tile-set">Zadana: <span id="val-temp-co-set">--</span>°C</div>
-                <div class="tile-stats" id="tile-stats-temp-co">min: -- / max: -- / śr: -- °C</div>
-            </div>
+        <div class="tile" id="tile-temp-flue">
+            <div class="tile-head"><iconify-icon icon="mdi:smoke" class="tile-icon"></iconify-icon><span class="tile-label">Spaliny</span></div>
+            <div class="tile-value"><span id="val-temp-flue-gas">--</span><small>°C</small></div>
+            <div class="tile-stats" id="tile-stats-temp-flue-gas"><span>min <b>--</b></span><span>max <b>--</b></span><span>śr. <b>--</b></span></div>
+        </div>
 
-            <div class="tile tile-temp" id="tile-temp-cwu">
-                <div class="tile-icon"><iconify-icon icon="mdi:shower"></iconify-icon></div>
-                <div class="tile-label">Temp. CWU</div>
-                <div class="tile-value"><span id="val-temp-cwu">--</span> <small>°C</small></div>
-                <div class="tile-set">Zadana: <span id="val-temp-cwu-set">--</span>°C</div>
-                <div class="tile-stats" id="tile-stats-temp-cwu">min: -- / max: -- / śr: -- °C</div>
-            </div>
+        <div class="tile" id="tile-temp-feeder">
+            <div class="tile-head"><iconify-icon icon="mdi:screw-machine-flat-top" class="tile-icon"></iconify-icon><span class="tile-label">Podajnik</span></div>
+            <div class="tile-value"><span id="val-temp-feeder">--</span><small>°C</small></div>
+            <div class="tile-stats" id="tile-stats-temp-feeder"><span>min <b>--</b></span><span>max <b>--</b></span><span>śr. <b>--</b></span></div>
+        </div>
 
-            <div class="tile tile-temp" id="tile-temp-back">
-                <div class="tile-icon"><iconify-icon icon="mdi:thermometer-chevron-down"></iconify-icon></div>
-                <div class="tile-label">Temp. powrotu</div>
-                <div class="tile-value"><span id="val-temp-back">--</span> <small>°C</small></div>
-                <div class="tile-stats" id="tile-stats-temp-back">min: -- / max: -- / śr: -- °C</div>
-            </div>
+        <div class="tile" id="tile-temp-external">
+            <div class="tile-head"><iconify-icon icon="mdi:home-thermometer-outline" class="tile-icon"></iconify-icon><span class="tile-label">Czujnik zewnętrzny</span></div>
+            <div class="tile-value"><span id="val-temp-external">--</span><small>°C</small></div>
+            <div class="tile-stats" id="tile-stats-temp-external"><span>min <b>--</b></span><span>max <b>--</b></span><span>śr. <b>--</b></span></div>
+        </div>
 
-            <div class="tile tile-temp" id="tile-temp-feeder">
-                <div class="tile-icon"><iconify-icon icon="mdi:cog"></iconify-icon></div>
-                <div class="tile-label">Temp. podajnika</div>
-                <div class="tile-value"><span id="val-temp-feeder">--</span> <small>°C</small></div>
-                <div class="tile-stats" id="tile-stats-temp-feeder">min: -- / max: -- / śr: -- °C</div>
-            </div>
+        <div class="tile" id="tile-temp-upper-buffer">
+            <div class="tile-head"><iconify-icon icon="mdi:arrow-collapse-up" class="tile-icon"></iconify-icon><span class="tile-label">Bufor górny</span></div>
+            <div class="tile-value"><span id="val-temp-upper-buffer">--</span><small>°C</small></div>
+            <div class="tile-stats" id="tile-stats-temp-upper-buffer"><span>min <b>--</b></span><span>max <b>--</b></span><span>śr. <b>--</b></span></div>
+        </div>
 
-            <div class="tile tile-temp" id="tile-temp-flue">
-                <div class="tile-icon"><iconify-icon icon="mdi:smoke"></iconify-icon></div>
-                <div class="tile-label">Temp. spalin</div>
-                <div class="tile-value"><span id="val-temp-flue-gas">--</span> <small>°C</small></div>
-                <div class="tile-stats" id="tile-stats-temp-flue-gas">min: -- / max: -- / śr: -- °C</div>
-            </div>
+        <div class="tile" id="tile-temp-lower-buffer">
+            <div class="tile-head"><iconify-icon icon="mdi:arrow-collapse-down" class="tile-icon"></iconify-icon><span class="tile-label">Bufor dolny</span></div>
+            <div class="tile-value"><span id="val-temp-lower-buffer">--</span><small>°C</small></div>
+            <div class="tile-stats" id="tile-stats-temp-lower-buffer"><span>min <b>--</b></span><span>max <b>--</b></span><span>śr. <b>--</b></span></div>
+        </div>
 
-            <div class="tile tile-temp" id="tile-temp-external">
-                <div class="tile-icon"><iconify-icon icon="mdi:weather-partly-cloudy"></iconify-icon></div>
-                <div class="tile-label">Czujnik zewn.</div>
-                <div class="tile-value"><span id="val-temp-external">--</span> <small>°C</small></div>
-                <div class="tile-stats" id="tile-stats-temp-external">min: -- / max: -- / śr: -- °C</div>
-            </div>
+        <div class="tile" id="tile-power">
+            <div class="tile-head"><iconify-icon icon="mdi:lightning-bolt-outline" class="tile-icon"></iconify-icon><span class="tile-label">Moc kotła</span></div>
+            <div class="tile-value"><span id="val-boiler-power">--</span><small id="val-boiler-power-unit">%</small></div>
+            <div class="meter" aria-hidden="true"><div class="meter-fill" id="meter-boiler-power"></div></div>
+            <div class="tile-set" id="boiler-power-detail"><span id="val-boiler-power-kw">--</span> kW (szacowana)</div>
+            <div class="tile-set" id="boiler-power-calorific" style="display:none" title="Sterownik szacuje moc w kW ze strumienia paliwa i kaloryczności ustawionej w sterowniku">Kaloryczność paliwa <strong><span id="val-calorific">--</span> kWh/kg</strong></div>
+        </div>
 
-            <div class="tile tile-temp" id="tile-temp-upper-buffer">
-                <div class="tile-icon"><iconify-icon icon="mdi:thermometer-chevron-up"></iconify-icon></div>
-                <div class="tile-label">Bufor górny</div>
-                <div class="tile-value"><span id="val-temp-upper-buffer">--</span> <small>°C</small></div>
-                <div class="tile-stats" id="tile-stats-temp-upper-buffer">min: -- / max: -- / śr: -- °C</div>
-            </div>
+        <div class="tile" id="tile-fan">
+            <div class="tile-head"><iconify-icon icon="mdi:fan" class="tile-icon"></iconify-icon><span class="tile-label">Wentylator</span></div>
+            <div class="tile-value"><span id="val-fan-power">--</span><small>%</small></div>
+            <div class="meter" aria-hidden="true"><div class="meter-fill" id="meter-fan-power"></div></div>
+        </div>
 
-            <div class="tile tile-temp" id="tile-temp-lower-buffer">
-                <div class="tile-icon"><iconify-icon icon="mdi:thermometer-chevron-down"></iconify-icon></div>
-                <div class="tile-label">Bufor dolny</div>
-                <div class="tile-value"><span id="val-temp-lower-buffer">--</span> <small>°C</small></div>
-                <div class="tile-stats" id="tile-stats-temp-lower-buffer">min: -- / max: -- / śr: -- °C</div>
-            </div>
+        <div class="tile" id="tile-flame">
+            <div class="tile-head"><iconify-icon icon="mdi:fire" class="tile-icon"></iconify-icon><span class="tile-label">Płomień</span></div>
+            <div class="tile-value"><span id="val-flame">--</span></div>
+        </div>
 
-            <div class="tile tile-empty-sensors" id="no-sensors-info" style="display:none">
-                Żaden kafelek danych nie jest włączony w ustawieniach.
-            </div>
+        <div class="tile" id="tile-fuel">
+            <div class="tile-head"><iconify-icon icon="mdi:grain" class="tile-icon"></iconify-icon><span class="tile-label">Strumień paliwa</span></div>
+            <div class="tile-value"><span id="val-fuel-stream">--</span><small>kg/h</small></div>
+            <div class="tile-set">Poziom w zasobniku <strong><span id="val-fuel-level">--</span><span id="val-fuel-level-unit">%</span></strong></div>
+        </div>
 
-            <div class="tile tile-power" id="tile-power">
-                <div class="tile-icon"><iconify-icon icon="mdi:lightning-bolt"></iconify-icon></div>
-                <div class="tile-label">Moc kotła</div>
-                <div class="tile-value"><span id="val-boiler-power">--</span> <small>%</small></div>
-                <div class="tile-set"><span id="val-boiler-power-kw">--</span> kW</div>
-            </div>
+        <div class="tile" id="tile-cost">
+            <div class="tile-head"><iconify-icon icon="mdi:cash" class="tile-icon"></iconify-icon><span class="tile-label">Koszt paliwa</span></div>
+            <div class="tile-value"><span id="val-cost-day">--</span><small>zł</small></div>
+            <div class="tile-set">Ostatnie 24 h</div>
+        </div>
 
-            <div class="tile tile-fan" id="tile-fan">
-                <div class="tile-icon"><iconify-icon icon="mdi:fan"></iconify-icon></div>
-                <div class="tile-label">Wentylator</div>
-                <div class="tile-value"><span id="val-fan-power">--</span> <small>%</small></div>
-            </div>
+        <div class="tile tile-empty-sensors" id="no-sensors-info" style="display:none">
+            Wszystkie kafelki są ukryte. Wybierz widoczne pomiary w <a href="/settings">ustawieniach</a>.
+        </div>
+    </section>
 
-            <div class="tile tile-flame" id="tile-flame">
-                <div class="tile-icon"><iconify-icon icon="mdi:fire"></iconify-icon></div>
-                <div class="tile-label">Płomień</div>
-                <div class="tile-value"><span id="val-flame">--</span></div>
-            </div>
+    <!-- Obiegi mieszaczy (widoczne, gdy sterownik raportuje podłączony mieszacz) -->
+    <section class="tiles-grid" id="mixers-section" aria-label="Obiegi mieszaczy" style="display:none"></section>
 
-            <div class="tile tile-fuel" id="tile-fuel">
-                <div class="tile-icon"><iconify-icon icon="mdi:gas-station"></iconify-icon></div>
-                <div class="tile-label">Paliwo</div>
-                <div class="tile-value"><span id="val-fuel-stream">--</span> <small>kg/h</small></div>
-                <div class="tile-set">Poziom: <span id="val-fuel-level">--</span>%</div>
+    <!-- Statystyki licznikowe -->
+    <section class="panel stats-section" id="poc-stats" style="display:none">
+        <div class="panel-head"><h2>Liczniki sterownika</h2></div>
+        <div class="stats-grid">
+            <div class="stat-item">
+                <span class="stat-label">Spalone paliwo</span>
+                <span><span class="stat-value" id="val-fuel-burned">--</span> kg</span>
             </div>
+            <div class="stat-item">
+                <span class="stat-label">Liczba rozpaleń</span>
+                <span class="stat-value" id="val-ignitions">--</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Praca 100%</span>
+                <span><span class="stat-value" id="val-work-100">--</span> h</span>
+            </div>
+            <div class="stat-item">
+                <span class="stat-label">Praca 50%</span>
+                <span><span class="stat-value" id="val-work-50">--</span> h</span>
+            </div>
+        </div>
+    </section>
 
-            <div class="tile tile-efficiency" id="tile-efficiency">
-                <div class="tile-icon"><iconify-icon icon="mdi:chart-line"></iconify-icon></div>
-                <div class="tile-label">Sprawność obiegu</div>
-                <div class="tile-value"><span id="val-efficiency">--</span> <small>°C</small></div>
-                <div class="tile-set">CO minus powrót</div>
+    <!-- Wykres -->
+    <section class="panel chart-section">
+        <div class="panel-head chart-header">
+            <h2>Historia pomiarów</h2>
+            <div class="chart-controls">
+                <select id="chart-range" onchange="loadChart()" aria-label="Zakres wykresu">
+                    <option value="1">Ostatnia godzina</option>
+                    <option value="6">Ostatnie 6 h</option>
+                    <option value="24" selected>Ostatnie 24 h</option>
+                    <option value="168">Ostatnie 7 dni</option>
+                </select>
+                <button class="btn-ghost btn-chart-reset" onclick="resetZoom()" title="Przywróć pełny zakres"><iconify-icon icon="mdi:magnify-minus-outline"></iconify-icon> Resetuj zoom</button>
             </div>
+        </div>
+        <div class="chart-series-toggle">
+            <label style="--c: var(--series-1)"><input type="checkbox" id="ser-temp-co"    checked onchange="toggleSeries(0)"><span>Zasilanie CO</span></label>
+            <label style="--c: var(--series-2)"><input type="checkbox" id="ser-temp-cwu"   checked onchange="toggleSeries(1)"><span>CWU</span></label>
+            <label style="--c: var(--series-3)"><input type="checkbox" id="ser-temp-back"  checked onchange="toggleSeries(2)"><span>Powrót</span></label>
+            <label style="--c: var(--series-4)"><input type="checkbox" id="ser-temp-flue"  checked onchange="toggleSeries(3)"><span>Spaliny</span></label>
+            <label style="--c: var(--series-5)"><input type="checkbox" id="ser-power"            onchange="toggleSeries(4)"><span>Moc kotła %</span></label>
+            <label style="--c: var(--series-6)"><input type="checkbox" id="ser-fan"              onchange="toggleSeries(5)"><span>Wentylator %</span></label>
+            <label style="--c: var(--series-7)"><input type="checkbox" id="ser-fuel"             onchange="toggleSeries(6)"><span>Paliwo kg/h</span></label>
+        </div>
+        <div class="chart-canvas-wrap chart-canvas-wrap-line">
+            <canvas id="temp-chart"></canvas>
+        </div>
+        <p class="chart-hint">Przewijaj kółkiem myszy, aby przybliżyć. Przeciągnij, aby przesunąć.</p>
+    </section>
 
-            <div class="tile tile-cost" id="tile-cost">
-                <div class="tile-icon"><iconify-icon icon="mdi:cash"></iconify-icon></div>
-                <div class="tile-label">Koszt dzienny</div>
-                <div class="tile-value"><span id="val-cost-day">--</span> <small>PLN</small></div>
-                <div class="tile-set">Ostatnie 24h</div>
-            </div>
-        </section>
+    <!-- Historia trybów pracy -->
+    <section class="panel timeline-section">
+        <button class="panel-head panel-toggle" type="button" onclick="toggleTimeline()">
+            <h2>Historia trybów pracy</h2>
+            <span id="timeline-toggle-icon"><iconify-icon icon="mdi:chevron-up"></iconify-icon></span>
+        </button>
+        <div id="timeline-content" style="display:block">
+            <div id="mode-timeline" class="mode-timeline"></div>
+        </div>
+    </section>
 
-        <!-- Pompy -->
-        <section class="pumps-section">
-            <h2>Pompy</h2>
-            <div class="pumps-grid">
-                <div class="pump-indicator" id="pump-co">
-                    <span class="pump-dot off"></span>
-                    <span>Pompa CO</span>
-                </div>
-                <div class="pump-indicator" id="pump-cwu">
-                    <span class="pump-dot off"></span>
-                    <span>Pompa CWU</span>
-                </div>
-                <div class="pump-indicator" id="pump-circ">
-                    <span class="pump-dot off"></span>
-                    <span>Cyrkulacja</span>
-                </div>
-            </div>
-        </section>
-
-        <!-- Statystyki PoC -->
-        <section class="stats-section" id="poc-stats" style="display:none">
-            <h2>Statystyki</h2>
-            <div class="stats-grid">
-                <div class="stat-item">
-                    <span class="stat-label">Spalone paliwo</span>
-                    <span class="stat-value" id="val-fuel-burned">--</span> kg
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Liczba rozpaleń</span>
-                    <span class="stat-value" id="val-ignitions">--</span>
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Praca 100%</span>
-                    <span class="stat-value" id="val-work-100">--</span> h
-                </div>
-                <div class="stat-item">
-                    <span class="stat-label">Praca 50%</span>
-                    <span class="stat-value" id="val-work-50">--</span> h
-                </div>
-            </div>
-        </section>
-
-        <!-- Wykres -->
-        <section class="chart-section">
-            <div class="chart-header">
-                <h2>Historia danych</h2>
-                <div class="chart-controls">
-                    <select id="chart-range" onchange="loadChart()">
-                        <option value="1">1 godzina</option>
-                        <option value="6">6 godzin</option>
-                        <option value="24" selected>24 godziny</option>
-                        <option value="168">7 dni</option>
-                    </select>
-                    <button class="btn-chart-reset" onclick="resetZoom()" title="Resetuj zoom"><iconify-icon icon="mdi:magnify-minus-outline"></iconify-icon> Reset zoom</button>
-                </div>
-            </div>
-            <div class="chart-series-toggle">
-                <label><input type="checkbox" id="ser-temp-co"    checked onchange="toggleSeries(0)"> Temp. CO</label>
-                <label><input type="checkbox" id="ser-temp-cwu"   checked onchange="toggleSeries(1)"> Temp. CWU</label>
-                <label><input type="checkbox" id="ser-temp-back"  checked onchange="toggleSeries(2)"> Temp. powrotu</label>
-                <label><input type="checkbox" id="ser-temp-flue"  checked onchange="toggleSeries(3)"> Temp. spalin</label>
-                <label><input type="checkbox" id="ser-power"            onchange="toggleSeries(4)"> Moc kotła (%)</label>
-                <label><input type="checkbox" id="ser-fan"              onchange="toggleSeries(5)"> Wentylator (%)</label>
-                <label><input type="checkbox" id="ser-fuel"             onchange="toggleSeries(6)"> Paliwo (kg/h)</label>
-            </div>
-            <canvas id="temp-chart" height="320"></canvas>
-        </section>
-
-        <!-- Historia trybów pracy -->
-        <section class="timeline-section">
-            <h2 onclick="toggleTimeline()" style="cursor:pointer">
-                Historia trybów pracy
-                <span id="timeline-toggle-icon" style="float:right;"><iconify-icon icon="mdi:chevron-up"></iconify-icon></span>
-            </h2>
-            <div id="timeline-content" style="display:block">
-                <div id="mode-timeline" class="mode-timeline"></div>
-            </div>
-        </section>
-    </main>
-
-    <footer>
-        <span>ecoMAX Monitor | Połączenie: <span id="footer-frames">0</span> ramek | <span id="footer-bytes">0</span></span>
+    <footer class="page-foot">
+        Odebrano <span id="footer-frames">0</span> ramek, <span id="footer-bytes">0</span>
     </footer>
+{% endblock %}
 
+{% block scripts %}
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/hammerjs@2.0.8/hammer.min.js"></script>
     <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-zoom@2.0.1/dist/chartjs-plugin-zoom.min.js"></script>
@@ -292,7 +285,4 @@
     </script>
     <script src="/static/js/mode_colors.js?v={{ asset_version }}"></script>
     <script src="/static/js/dashboard.js?v={{ asset_version }}"></script>
-    <script src="/static/js/nav.js?v={{ asset_version }}"></script>
-    <script src="/static/js/theme.js?v={{ asset_version }}"></script>
-</body>
-</html>
+{% endblock %}

@@ -18,9 +18,11 @@ function _applyTheme(theme) {
         if (theme === THEME_DARK) {
             btn.innerHTML = '<iconify-icon icon="mdi:weather-sunny"></iconify-icon>';
             btn.title = 'Przełącz na tryb jasny';
+            btn.setAttribute('aria-label', btn.title);
         } else {
             btn.innerHTML = '<iconify-icon icon="mdi:weather-night"></iconify-icon>';
             btn.title = 'Przełącz na tryb ciemny';
+            btn.setAttribute('aria-label', btn.title);
         }
     }
 }

@@ -1,35 +1,57 @@
 # Galeria zrzutów ekranu
 
-Zrzuty ekranu poszczególnych stron aplikacji [ecoMAX Monitor](README.md). Dashboard znajduje się w głównym [README.md](README.md).
+Zrzuty ekranu poszczególnych stron aplikacji [ecoMAX Monitor](README.md).
 
-## Dashboard
+## Panel główny
 
-![Dashboard - widok alternatywny](img/panel_glowny_2.png)
+Bieżący stan kotła: tryb pracy, pompy, wentylator, podajnik i zapalarka, temperatury, moc, mieszacz, pogoda i wykres historii.
 
-## Dane bieżące
+![Panel główny](img/Panel_glowny.png)
 
-![Dane bieżące](img/dane_1.png)
+## Analiza pracy
 
-## Analiza — wykresy
+Podsumowanie wybranego okresu, udział trybów pracy, zużycie paliwa i koszty.
 
-![Wykresy historyczne 1](img/wykresy_1.png)
-
-![Wykresy historyczne 2](img/wykresy_2.png)
+![Analiza pracy](img/Analiza_pracy.png)
 
 ## Parametry
 
-![Parametry kotła](img/parametry_1.png)
+Wszystkie wartości odczytywane ze sterownika.
+
+![Parametry](img/Parametry.png)
+
+## Sterowanie
+
+Informacje o urządzeniu, włączanie/wyłączanie kotła i nastawy.
+
+![Sterowanie – kocioł i nastawy](img/Sterowanie.png)
+
+Parametry mieszacza.
+
+![Sterowanie – mieszacze](img/Sterowanie_1.png)
+
+Parametry pracy sterownika z polskimi opisami (tylko odczyt).
+
+![Sterowanie – parametry pracy sterownika](img/Sterowanie_2.png)
+
+Historia zmian ustawień i harmonogramy tygodniowe.
+
+![Sterowanie – historia i harmonogramy](img/Sterowanie_3.png)
 
 ## Alerty
 
-![Alerty](img/alerty_1.png)
+Alerty aplikacji i historia alarmów zapisanych w sterowniku.
+
+![Alerty](img/Alerty.png)
 
 ## Logi
 
-![Logi aplikacji](img/log_1.png)
+![Logi aplikacji](img/Logi.png)
 
 ## Ustawienia
 
-![Ustawienia 1](img/ustawienia_1.png)
+![Ustawienia 1](img/Ustawienia.png)
 
-![Ustawienia 2](img/ustawienia_2.png)
+![Ustawienia 2](img/Ustawienia_1.png)
+
+![Ustawienia 3](img/Ustawienia_2.png)

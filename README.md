@@ -1,51 +1,91 @@
 # ecoMAX Monitor
 
-Aplikacja webowa do monitorowania i sterowania sterownikiem kotła **ecoMAX** (Plum/ecoNET) przez moduł **Elfin EW11A** (konwerter RS485 → TCP/WiFi). Odczytuje dane w czasie rzeczywistym, zapisuje historię do bazy SQLite, pozwala zmieniać ustawienia kotła i udostępnia dashboard oraz REST API.
+**Podgląd i sterowanie kotłem z przeglądarki — w domu, na telefonie lub komputerze.**
 
-To w pełni samodzielna aplikacja — nie wymaga instalowania ani konfigurowania żadnych dodatkowych systemów (np. Home Assistant). Integracja z Home Assistant i Prometheusem (opisana w sekcji [Integracje](#integracje)) jest opcjonalna i nie jest potrzebna do korzystania z dashboardu, sterowania kotłem czy alertów.
+ecoMAX Monitor to darmowa aplikacja dla właścicieli kotłów na pellet lub ekogroszek ze sterownikiem **ecoMAX** firmy Plum. Pokazuje na bieżąco, co dzieje się w kotłowni: jakie są temperatury, czy kocioł pracuje, rozpala się czy wygasza, ile spala paliwa i ile to kosztuje. Pozwala też zmieniać najważniejsze nastawy bez chodzenia do kotłowni i powiadamia, gdy coś jest nie tak.
 
+Aplikacja działa w Twojej sieci domowej. Nie wymaga konta w chmurze producenta, abonamentu ani Home Assistanta. Wszystkie dane zostają u Ciebie.
+
+![Panel główny ecoMAX Monitor](img/Panel_glowny.png)
+
+Więcej zrzutów ekranu znajdziesz w [galerii](screens.md).
+
+## Co potrafi
+
+### Podgląd na żywo
+
+- Temperatury: kotła (CO), ciepłej wody (CWU), powrotu, spalin i — jeśli są podłączone — czujnika zewnętrznego, bufora i podajnika.
+- Tryb pracy kotła (praca, nadzór, rozpalanie, wygaszanie, postój…) i godzina z serwera.
+- Co aktualnie pracuje: pompy, wentylator, podajnik paliwa, zapalarka.
+- Obieg mieszacza: temperatura, zadana i stopień otwarcia zaworu.
+- Moc kotła, praca wentylatora, zużycie paliwa i szacowany koszt dnia.
+- Pogoda dla miejsca, w którym stoi kocioł.
+
+### Historia i analizy
+
+- Wykresy temperatur i pracy kotła z ostatnich godzin, dni i tygodni.
+- Ile czasu kocioł spędza w każdym trybie, ile razy się rozpala i jak często rozpalanie się nie udaje.
+- Zużycie paliwa, koszt dzienny i miesięczny oraz koszt wyprodukowanej kilowatogodziny.
+- Eksport danych do pliku CSV (np. do Excela).
+
+### Alarmy i powiadomienia
+
+- Pełna historia alarmów zapisanych w sterowniku (np. „nieudana próba rozpalania”, „zanik zasilania”) — także z okresów, gdy aplikacja była wyłączona.
+- Własne alerty aplikacji: zbyt wysoka temperatura spalin, zbyt niska temperatura kotła, mało paliwa, utrata łączności.
+- Powiadomienia pojawiają się od razu na otwartej stronie.
+
+### Sterowanie
+
+- Zmiana temperatur zadanych CO i CWU, histerez, trybu ciepłej wody, trybu lato, sterowania pogodowego i innych nastaw.
+- Ustawienia obiegu mieszacza.
+- Tygodniowe harmonogramy (np. obniżenie temperatury w nocy) ustawiane na wygodnej siatce godzin.
+- Włączanie i wyłączanie kotła.
+- Podgląd wszystkich parametrów pracy sterownika (rozpalanie, nadzór, wygaszanie, podawanie paliwa) z polskimi opisami.
+- Historia wszystkich zmian — także tych zrobionych ręcznie na panelu kotła.
+- Aplikacja sprawdza dozwolony zakres każdej wartości, zanim wyśle ją do sterownika.
+
+### Dla zaawansowanych
+
+- Podgląd wszystkich surowych danych, które wysyła sterownik.
+- Integracja z Home Assistant i Prometheus/Grafana (opcjonalna).
+- Tryb symulacji do testów bez kotła.
+
+## Jak to działa
+
+Sterownik ecoMAX ma gniazdo komunikacyjne (RS485, to samo, do którego podłącza się moduł internetowy ecoNET). Podłączasz do niego niewielki moduł **Elfin EW11A**, który przekazuje dane przez Wi‑Fi do Twojej sieci. Aplikacja działa na dowolnym komputerze w domu — najczęściej na Raspberry Pi albo małym serwerze — i udostępnia stronę, którą otwierasz w przeglądarce.
+
+```text
+[Sterownik ecoMAX] --kabel RS485--> [Elfin EW11A] --Wi-Fi--> [ecoMAX Monitor] --> przeglądarka
 ```
-[ecoMAX] --RS485/G2--> [Elfin EW11A] --TCP/WiFi--> [ecoMAX Monitor (Flask + SocketIO)]
-```
 
-![Dashboard ecoMAX Monitor](img/panel_glowny_1.png)
+> Aplikacja rozmawia ze sterownikiem tym samym protokołem co oficjalny moduł ecoNET. Zmiany nastaw robisz na własną odpowiedzialność — tak samo jak na panelu kotła.
 
-Więcej zrzutów ekranu (analiza, parametry, sterowanie, alerty, logi, ustawienia) znajdziesz w [galerii screenshotów](screens.md).
+---
 
 ## Spis treści
 
-- [Funkcje](#funkcje)
 - [Wymagania](#wymagania)
 - [Instalacja](#instalacja)
 - [Konfiguracja EW11A](#konfiguracja-ew11a)
 - [Pierwsze uruchomienie i konfiguracja aplikacji](#pierwsze-uruchomienie-i-konfiguracja-aplikacji)
 - [Uruchomienie](#uruchomienie)
 - [Autostart (systemd)](#autostart-systemd)
+- [Aktualizacja](#aktualizacja)
 - [Strony aplikacji](#strony-aplikacji)
+- [Dostęp i bezpieczeństwo](#dostęp-i-bezpieczeństwo)
 - [REST API](#rest-api)
 - [Integracje](#integracje)
 - [Struktura plików](#struktura-plików)
 - [Protokół komunikacji (ecoNET)](#protokół-komunikacji-econet)
+- [Testy](#testy)
 - [Rozwiązywanie problemów](#rozwiązywanie-problemów)
-
-## Funkcje
-
-- **Dashboard** – temperatury (CO, CWU, powrót, podajnik, spaliny, zewnętrzna), moc kotła (% i kW), wentylator, płomień, poziom i strumień paliwa, stan pomp (CO/CWU/cyrkulacja), pogoda dla lokalizacji kotła, aktualizacja na żywo przez WebSocket.
-- **Analiza** – wykresy historyczne (1h/6h/24h/7 dni), statystyki min/max/avg, szacowany koszt zużytego paliwa i raport dzienny.
-- **Parametry** – podgląd wszystkich dostępnych parametrów/telemetrii zwracanych przez sterownik (tryb tylko do odczytu).
-- **Sterowanie kotłem** – odczyt i zapis nastaw sterownika (ecoMAX, mieszacze, termostaty), harmonogramy tygodniowe (grzanie, CWU, cyrkulacja itd.), historia zmian ustawień, opcjonalny profil serwisowy.
-- **Alerty** – automatyczne wykrywanie trybu ALARM, zbyt wysokiej temperatury spalin, zbyt niskiej temperatury CO, niskiego poziomu paliwa i braku połączenia z EW11A; powiadomienia na żywo przez WebSocket.
-- **Logi** – podgląd logów aplikacji w przeglądarce oraz pobieranie pliku logu.
-- **Ustawienia** – cała konfiguracja aplikacji (adres EW11A, interwały, progi alertów, cena paliwa, strefa czasowa/NTP, retencja danych) edytowana z poziomu przeglądarki i zapisywana w bazie SQLite.
-- **Integracje** – endpoint REST dla Home Assistant (`/api/ha`) oraz eksport metryk w formacie Prometheus (`/metrics`).
-- **Tryb symulacji** – generator losowych danych do testów bez podłączonego sprzętu.
 
 ## Wymagania
 
-- **Python 3.10+**
-- Moduł **[Elfin EW11A](https://pl.aliexpress.com/w/wholesale-elfin-ew11a-wifi.html)** skonfigurowany jako serwer TCP (domyślnie port 8899) — nie testowałem z innymi modułami tego typu, ale raczej nie powinno być problemów.
-- Sterownik **ecoMAX** podłączony do EW11A przez RS485 (port G2, wtyczka RJ11)
-- Komputer/serwer/Raspberry Pi/VM w tej samej sieci co EW11A
+- **Python 3.10–3.12** (biblioteka `eventlet` 0.37 nie działa z Pythonem 3.14).
+- Moduł **[Elfin EW11A](https://pl.aliexpress.com/w/wholesale-elfin-ew11a-wifi.html)** skonfigurowany jako serwer TCP (domyślnie port 8899). Nie testowałem innych modułów tego typu, ale powinny działać.
+- Sterownik **ecoMAX** podłączony do EW11A przez RS485 (port G2, wtyczka RJ11). Aplikacja była rozwijana i testowana na **ecoMAX920P1** z panelem 5.11; inne sterowniki ecoMAX typu P powinny działać, część funkcji może być niedostępna.
+- Komputer/serwer/Raspberry Pi/VM w tej samej sieci co EW11A.
 
 ## Instalacja
 
@@ -95,7 +135,7 @@ Moduł EW11A musi być skonfigurowany w trybie **TCP Server**:
 
 Konfiguracja odbywa się przez panel webowy EW11A (domyślnie `http://10.10.100.254`) lub aplikację mobilną producenta.
 
-> Adres `192.168.1.100` używany w tej instrukcji to tylko przykład (i domyślna wartość w aplikacji). Sprawdź w panelu swojego routera lub w konfiguracji EW11A, jaki adres IP faktycznie przydzielił mu Twój router, i podmieniaj go w poniższych komendach.
+> Adres `192.168.1.100` używany w tej instrukcji to tylko przykład (i domyślna wartość w aplikacji). Sprawdź w panelu swojego routera lub w konfiguracji EW11A, jaki adres IP faktycznie przydzielił mu router, i podmieniaj go w poniższych komendach.
 
 Sprawdzenie połączenia przed uruchomieniem aplikacji:
 
@@ -109,15 +149,20 @@ nc 192.168.1.100 8899 | xxd | head -50
 
 Jeśli widzisz dane binarne — połączenie działa.
 
+> Do jednego modułu EW11A podłączaj **tylko jedną** instancję aplikacji. Aplikacja odpowiada sterownikowi jako moduł ecoNET, więc dwie instancje zakłócałyby się nawzajem na magistrali.
+
 ## Pierwsze uruchomienie i konfiguracja aplikacji
 
-Cała konfiguracja aplikacji jest przechowywana w bazie SQLite i edytowana z poziomu przeglądarki — nie trzeba ręcznie edytować żadnych plików.
-
-Aby dostać się do panelu ustawień:
+Cała konfiguracja jest przechowywana w bazie SQLite i edytowana z poziomu przeglądarki — nie trzeba ręcznie edytować żadnych plików.
 
 1. Uruchom aplikację (`python run.py`) i otwórz w przeglądarce `http://<IP_serwera>:5050`.
-2. Dopóki adres EW11A nie zostanie skonfigurowany, na dashboardzie widoczny jest baner **„Aplikacja nie jest skonfigurowana”** z linkiem prosto do ustawień.
-3. W dowolnym momencie możesz też otworzyć ustawienia z górnego menu (**Menu → Ustawienia**) albo bezpośrednio pod adresem `http://<IP_serwera>:5050/settings`.
+2. Dopóki adres EW11A nie zostanie skonfigurowany, na panelu głównym widoczny jest baner **„Aplikacja nie jest skonfigurowana”** z linkiem do ustawień.
+3. Ustawienia są też dostępne w menu (**Ustawienia**) albo pod adresem `http://<IP_serwera>:5050/settings`.
+
+Po pierwszym połączeniu ze sterownikiem aplikacja sama, w tle:
+- zaimportuje historię alarmów zapisaną w sterowniku (bez wysyłania alertów za stare zdarzenia),
+- pobierze opis danych wysyłanych przez sterownik (ramka 0x08),
+- zacznie zbierać statystyki dzienne pracy kotła.
 
 Najważniejsze ustawienia (z domyślnymi wartościami):
 
@@ -125,37 +170,39 @@ Najważniejsze ustawienia (z domyślnymi wartościami):
 |----------------------------|--------------------|--------------------------------------------------|
 | `ew11a_host`               | `192.168.1.100`    | Adres IP modułu EW11A                            |
 | `ew11a_port`                | `8899`              | Port TCP EW11A                                   |
-| `read_interval`             | `5`                 | Co ile sekund odczytywać dane z kotła            |
+| `read_interval`             | `5`                 | Co ile sekund odświeżać dane na stronie          |
 | `db_save_interval`          | `60`                | Co ile sekund zapisywać próbkę do bazy           |
 | `db_retention_days`         | `30`                | Ile dni przechowywać historię pomiarów           |
 | `fuel_price_per_ton`        | `1000`              | Cena paliwa (do wyliczania kosztów)              |
+| `fuel_level_not_set`        | `0`                 | `1` = poziom paliwa nie jest skalibrowany w sterowniku (ukrywa poziom i wyłącza alert o niskim poziomie) |
+| `boiler_nominal_power_kw`   | *(puste)*           | Moc nominalna kotła; pozwala pokazać moc w %, gdy sterownik jej nie podaje |
 | `alert_temp_flue_max`       | `250`               | Próg alertu: temperatura spalin (°C)             |
 | `alert_temp_co_min`         | `30`                | Próg alertu: minimalna temperatura CO (°C)       |
 | `alert_fuel_level_min`      | `15`                | Próg alertu: minimalny poziom paliwa (%)         |
-| `alert_no_connection_min`   | `5`                 | Po ilu minutach braku połączenia zgłosić alert   |
+| `alert_no_connection_min`   | `5`                 | Po ilu minutach braku danych zgłosić alert       |
 | `weather_lat` / `weather_lon` | *(puste)*         | Współrzędne do pobierania pogody                 |
 | `time_zone`                 | `Europe/Warsaw`     | Strefa czasowa aplikacji                         |
 | `log_enabled` / `log_retention_days` | `1` / `14` | Logowanie do pliku i jego retencja               |
 
-Zmiany adresu/portu EW11A i interwałów odczytu wymagają restartu aplikacji (patrz [Autostart](#autostart-systemd) → restart usługi).
+Zmiany adresu/portu EW11A i interwałów wymagają restartu aplikacji (patrz [Autostart](#autostart-systemd) → restart usługi).
+
+> Moc kotła w kW sterownik **szacuje** ze strumienia paliwa i kaloryczności paliwa ustawionej w sterowniku (aplikacja odczytuje ją i pokazuje obok mocy). Jeśli kaloryczność w sterowniku jest nieprawidłowa, moc, energia i koszt kWh też będą zawyżone lub zaniżone.
 
 ### Opcjonalne zmienne środowiskowe
 
-Nadpisują wartości z bazy/domyślne i dodają dodatkowe zabezpieczenia dostępu przy udostępnianiu aplikacji poza siecią lokalną:
+Dodają zabezpieczenia przy udostępnianiu aplikacji poza siecią lokalną (szczegóły w sekcji [Dostęp i bezpieczeństwo](#dostęp-i-bezpieczeństwo)):
 
 | Zmienna                        | Zastosowanie                                              |
 |---------------------------------|-------------------------------------------------------------|
 | `CORS_ALLOWED_ORIGINS`          | Lista dozwolonych originów CORS/WebSocket (domyślnie `*`)   |
-| `LOGS_ACCESS_TOKEN`             | Token wymagany do podglądu/pobierania logów spoza LAN       |
-| `TIME_ACCESS_TOKEN`             | Token do operacji na czasie systemowym/NTP spoza LAN        |
-| `RESET_ACCESS_TOKEN`            | Token do resetu danych/bazy spoza LAN                       |
-| `BOILER_CONTROL_ACCESS_TOKEN`   | Token do zmiany ustawień kotła spoza LAN                    |
+| `LOGS_ACCESS_TOKEN`             | Token wymagany do podglądu/pobierania logów                |
+| `TIME_ACCESS_TOKEN`             | Token do operacji na czasie systemowym/NTP                  |
+| `RESET_ACCESS_TOKEN`            | Token do resetu danych/bazy                                 |
+| `BOILER_CONTROL_ACCESS_TOKEN`   | Token do zmiany ustawień i włączania/wyłączania kotła       |
 | `BOILER_SERVICE_ACCESS_TOKEN`   | Token odblokowujący profil serwisowy parametrów kotła        |
 | `ASSET_VERSION`                 | Wersja plików statycznych (cache-busting)                    |
 
-Aplikacja **nie wczytuje pliku `.env`** — to zwykłe zmienne środowiskowe procesu (`os.environ`), więc trzeba je ustawić tam, gdzie uruchamiany jest `run.py`:
-
-**Uruchomienie ręczne (terminal):**
+Aplikacja **nie wczytuje pliku `.env`** — to zwykłe zmienne środowiskowe procesu, ustawiane tam, gdzie uruchamiany jest `run.py`:
 
 ```bash
 export BOILER_CONTROL_ACCESS_TOKEN="wygenerowany-token"
@@ -163,13 +210,7 @@ export CORS_ALLOWED_ORIGINS="http://192.168.1.10:5050"
 python run.py
 ```
 
-albo jednorazowo, tylko dla danego uruchomienia:
-
-```bash
-BOILER_CONTROL_ACCESS_TOKEN="wygenerowany-token" python run.py
-```
-
-**Uruchomienie przez systemd** (patrz [Autostart](#autostart-systemd)) — dodaj wpisy `Environment=` w pliku `ecomax-monitor.service`, każdą zmienną w osobnej linii, i zrestartuj usługę (`daemon-reload` + `restart`):
+W usłudze systemd dodaj wpisy `Environment=` (każda zmienna w osobnej linii) i zrestartuj usługę (`daemon-reload` + `restart`):
 
 ```ini
 [Service]
@@ -178,36 +219,15 @@ Environment="BOILER_CONTROL_ACCESS_TOKEN=wygenerowany-token"
 Environment="CORS_ALLOWED_ORIGINS=http://192.168.1.10:5050"
 ```
 
-Bez skonfigurowanych tokenów dostęp do operacji wrażliwych (logi, czas, reset, sterowanie kotłem) jest ograniczony do sieci lokalnej (loopback/private/link-local) lub lokalny VPN. 
-
 ## Uruchomienie
-
-### Tryb normalny (z EW11A)
 
 ```bash
 source venv/bin/activate
-python run.py
+python run.py                                  # tryb normalny (z EW11A)
+python run.py --host 192.168.0.50 --port 8899  # inny adres EW11A (nadpisuje wartość z bazy)
+python run.py --simulate                       # symulacja - losowe dane, bez sprzętu
+python run.py --debug                          # więcej logów (m.in. surowe ramki)
 ```
-
-### Z niestandardowym adresem EW11A (nadpisuje wartość z bazy)
-
-```bash
-python run.py --host 192.168.0.50 --port 8899
-```
-
-### Tryb symulacji (bez sprzętu, do testów)
-
-```bash
-python run.py --simulate
-```
-
-### Tryb debug
-
-```bash
-python run.py --debug
-```
-
-### Wszystkie opcje
 
 | Opcja           | Opis                                            | Domyślnie         |
 |------------------|--------------------------------------------------|--------------------|
@@ -221,15 +241,13 @@ Po uruchomieniu otwórz w przeglądarce `http://<IP_serwera>:5050`.
 
 ## Autostart (systemd)
 
-Aby aplikacja uruchamiała się automatycznie po restarcie serwera:
-
-### 1. Utwórz plik usługi systemd
+### 1. Utwórz plik usługi
 
 ```bash
 sudo nano /etc/systemd/system/ecomax-monitor.service
 ```
 
-Wklej poniższą zawartość — **koniecznie podmień `ubuntu` na swojego użytkownika systemowego oraz ścieżkę na tę, w której faktycznie umieściłeś/aś katalog `ecoMAX-Monitor`** (poniżej jest tylko przykład, u Ciebie może to być np. `/home/pi/ecoMAX-Monitor` albo dowolna inna lokalizacja):
+Podmień `ubuntu` na swojego użytkownika i ścieżkę na tę, w której jest katalog aplikacji (np. `/home/pi/ecoMAX-Monitor`):
 
 ```ini
 [Unit]
@@ -247,7 +265,6 @@ ExecStart=/home/ubuntu/ecoMAX-Monitor/venv/bin/python run.py
 Restart=always
 RestartSec=10
 
-# Logi
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=ecomax-monitor
@@ -256,9 +273,9 @@ SyslogIdentifier=ecomax-monitor
 WantedBy=multi-user.target
 ```
 
-> **Uwaga:** endpoint `POST /api/restart` oraz przycisk restartu w Ustawieniach wywołują `sudo systemctl restart ecomax-monitor` — nazwa usługi musi się zgadzać (`ecomax-monitor`), a użytkownik uruchamiający aplikację powinien mieć uprawnienia `sudo` bez hasła do tej konkretnej komendy (np. wpis w `/etc/sudoers.d/`), jeśli funkcja ma działać z UI.
+> Przycisk restartu w Ustawieniach (`POST /api/restart`) wywołuje `sudo systemctl restart ecomax-monitor` — nazwa usługi musi się zgadzać, a użytkownik aplikacji powinien mieć uprawnienie `sudo` bez hasła do tej jednej komendy (wpis w `/etc/sudoers.d/`).
 
-### 2. Aktywuj i uruchom usługę
+### 2. Aktywuj i uruchom
 
 ```bash
 sudo systemctl daemon-reload
@@ -277,43 +294,69 @@ sudo systemctl start ecomax-monitor
 | `sudo systemctl stop ecomax-monitor`               | Zatrzymanie                   |
 | `sudo systemctl disable ecomax-monitor`            | Wyłącz autostart               |
 
+## Aktualizacja
+
+```bash
+cd ecoMAX-Monitor
+cp data/measurements.db data/measurements.db.bak   # kopia zapasowa bazy
+git pull
+source venv/bin/activate && pip install -r requirements.txt
+sudo systemctl restart ecomax-monitor
+```
+
+Baza jest aktualizowana automatycznie przy starcie (nowe kolumny i tabele są dodawane bez utraty danych). Po aktualizacji odśwież stronę w przeglądarce.
+
 ## Strony aplikacji
 
-| Strona            | Adres              | Opis                                                        |
+| Strona            | Adres              | Co zawiera                                                    |
 |--------------------|---------------------|----------------------------------------------------------------|
-| Dashboard          | `/`                 | Bieżące dane, kafelki sensorów, pogoda, ostatnie alerty        |
-| Analiza            | `/analysis`         | Wykresy historyczne, statystyki, koszty paliwa, raport dzienny |
-| Parametry          | `/parameters`       | Pełna lista parametrów/telemetrii kotła (odczyt)               |
-| Sterowanie         | `/boiler-control`   | Zmiana nastaw kotła, mieszaczy, termostatów i harmonogramów    |
-| Alerty             | `/alerts`           | Historia alertów                                                |
-| Logi               | `/logs`             | Podgląd i pobieranie logów aplikacji                            |
-| Ustawienia         | `/settings`         | Konfiguracja połączenia, alertów, czasu, retencji danych        |
+| Panel główny       | `/`                 | Tryb pracy, temperatury, pompy, wentylator, podajnik, zapalarka, mieszacz, moc, paliwo, pogoda, wykres historii, ostatnie alerty |
+| Analiza            | `/analysis`         | Udział trybów pracy, cykle pracy i rozpalenia dzień po dniu, paliwo i koszty, wykres mieszacza, anomalie |
+| Parametry          | `/parameters`       | Wszystkie wartości odczytywane ze sterownika i dane regulatora (ramka 0x08) z możliwością nazywania pól |
+| Sterowanie         | `/boiler-control`   | Informacje o urządzeniu, wł./wył. kotła, nastawy, mieszacze, parametry pracy, harmonogramy, historia zmian |
+| Alerty             | `/alerts`           | Alerty aplikacji i historia alarmów sterownika                 |
+| Logi               | `/logs`             | Podgląd i pobieranie logów aplikacji                          |
+| Ustawienia         | `/settings`         | Połączenie, interwały, czas/NTP, pogoda, kafelki, progi alertów, kocioł i paliwo, retencja, logi |
+
+Strona **Sterowanie** ma trzy profile widoku: *Użytkownik* (najczęściej zmieniane nastawy), *Instalator* (wszystkie nastawy, mieszacze, parametry pracy sterownika) i *Serwis* (po podaniu tokenu `BOILER_SERVICE_ACCESS_TOKEN` — parametry serwisowe).
+
+## Dostęp i bezpieczeństwo
+
+- Bez skonfigurowanych tokenów operacje wrażliwe (zmiana nastaw, wł./wył. kotła, logi, czas, reset danych) są dostępne tylko z sieci lokalnej (adresy prywatne, loopback, link-local — w tym lokalny VPN).
+- Po ustawieniu tokenu odpowiednia operacja wymaga go zawsze. Token sterowania można zapisać w przeglądarce (localStorage) — strony dodają go automatycznie do zapytań.
+- Aplikacja nie ma logowania użytkowników. **Nie wystawiaj jej bezpośrednio do internetu** — do zdalnego dostępu użyj VPN (np. WireGuard, Tailscale).
 
 ## REST API
 
-Wybrane, najważniejsze endpointy (pełna lista w [web/routes.py](web/routes.py)):
+Wybrane endpointy (pełna lista w [web/routes.py](web/routes.py)):
 
 | Endpoint                                    | Opis                                                     |
 |-----------------------------------------------|-------------------------------------------------------------|
 | `GET /api/data`                               | Aktualne dane z kotła + status połączenia                   |
-| `GET /api/parameters`                         | Pełna lista parametrów telemetrii (read-only)                |
+| `GET /api/parameters`                         | Wszystkie wartości odczytywane ze sterownika                |
 | `GET /api/history?hours=24&limit=500`         | Historia pomiarów                                            |
 | `GET /api/statistics?hours=24`                | Statystyki (min/max/avg)                                     |
 | `GET /api/export`                             | Eksport historii do CSV                                      |
 | `GET /api/costs?hours=24`                     | Szacowany koszt zużytego paliwa                              |
 | `GET /api/report?days=7`                      | Raport dzienny zużycia paliwa                                |
-| `GET /api/alerts` / `POST /api/alerts/read`   | Historia alertów / oznaczenie jako przeczytane               |
+| `GET /api/analytics/daily?days=14`            | Dzienne cykle pracy: czas w trybach, rozpalenia, podajnik, energia, koszt kWh |
+| `GET /api/fuel-info`                          | Kaloryczność paliwa ze sterownika, moc nominalna             |
+| `GET /api/alerts` / `POST /api/alerts/read`   | Alerty aplikacji / oznaczenie jako przeczytane               |
+| `GET /api/controller-alarms`                  | Historia alarmów sterownika                                  |
+| `POST /api/controller-alarms/refresh`         | Wymuszenie odczytu alarmów ze sterownika                     |
+| `GET /api/regdata`                            | Dane regulatora (ramka 0x08) z nazwami pól                   |
 | `GET/POST /api/config`                        | Odczyt/zapis konfiguracji aplikacji                           |
-| `GET /api/boiler-control/parameters`          | Katalog parametrów sterowania z bieżącymi wartościami         |
-| `POST /api/boiler-control/set-parameter`      | Zmiana pojedynczego parametru kotła/mieszacza/termostatu      |
-| `POST /api/boiler-control/set-batch`          | Zmiana wielu parametrów naraz                                |
+| `GET /api/boiler-control/parameters`          | Katalog nastaw z bieżącymi wartościami i zakresami            |
+| `POST /api/boiler-control/set-parameter`      | Zmiana nastawy kotła/mieszacza/termostatu                     |
+| `POST /api/boiler-control/set-batch`          | Zmiana wielu nastaw naraz                                    |
+| `GET /api/boiler-control/mixers`              | Parametry mieszaczy                                          |
+| `GET /api/boiler-control/controller-parameters` | Wszystkie parametry pracy sterownika (odczyt)              |
+| `GET /api/boiler-control/device-info`         | Model, UID, wersje modułów, mieszacze/termostaty             |
+| `POST /api/boiler-control/power`              | Włączenie/wyłączenie kotła (`{"enabled": true/false}`)       |
 | `GET/POST /api/boiler-control/schedules`      | Odczyt/zapis harmonogramów tygodniowych                       |
-| `GET /api/boiler-control/history`             | Historia zmian ustawień kotła                                 |
+| `GET /api/boiler-control/history`             | Historia zmian ustawień (także z panelu kotła)                |
 | `GET /api/weather`                            | Pogoda dla skonfigurowanej lokalizacji                        |
-| `GET /api/status`                             | Status połączenia z EW11A                                     |
-| `GET /api/setup-status`                       | Czy aplikacja została skonfigurowana                          |
-| `GET /api/logs` / `GET /api/logs/download`    | Podgląd / pobranie logów                                     |
-| `GET/POST /api/time/status`, `/api/time/set`  | Status i ustawianie czasu systemowego / strefy / NTP           |
+| `GET /api/status`                             | Status połączenia z EW11A i czas działania aplikacji          |
 
 Przykład:
 
@@ -331,7 +374,9 @@ sensor:
     resource: http://<IP>:5050/api/ha
     name: ecoMAX
     json_attributes: [temp_co, temp_cwu, temp_back, temp_flue_gas,
-                       boiler_power, fuel_stream, mode_name]
+                       boiler_power, boiler_power_kw, fuel_stream, fan_on,
+                       feeder_on, lighter_on, mixer1_temp, mixer1_target,
+                       mixer1_valve, pending_alerts, mode_name]
     value_template: '{{ value_json.mode_name }}'
 ```
 
@@ -345,60 +390,88 @@ scrape_configs:
     metrics_path: /metrics
 ```
 
+Eksportowane są m.in. temperatury, moc, wentylator, paliwo, stany pomp, wentylatora, podajnika i zapalarki, dane mieszacza i liczba aktywnych alarmów sterownika.
+
 ## Struktura plików
 
-```
+```text
 ecoMAX-Monitor/
-├── run.py                     # Entry point + symulator testowy
-├── database.py                # SQLite - historia pomiarów, konfiguracja, alerty
-├── alerts.py                  # Silnik alertów
-├── sensors.py                 # Definicje kafelków dashboardu i widocznych sensorów
-├── logger.py                  # Logowanie do pliku + rotacja/retencja
-├── requirements.txt           # Zależności Python
+├── run.py                     # Start aplikacji + symulator testowy
+├── database.py                # SQLite: pomiary, konfiguracja, alerty, alarmy sterownika, statystyki
+├── alerts.py                  # Silnik alertów aplikacji
+├── analytics.py               # Statystyki pracy kotła liczone z każdej ramki
+├── controller_sync.py         # Synchronizacja w tle: parametry, alarmy, schemat danych
+├── derived_data.py            # Wartości zależne od ustawień (poziom paliwa, moc %)
+├── sensors.py                 # Definicje kafelków panelu głównego
+├── logger.py                  # Logowanie do pliku + retencja
 ├── econet/
-│   ├── protocol.py            # Parser ramek ecoNET (CRC, budowa/rozpoznawanie ramek)
-│   ├── decoder.py             # Dekoder danych ecoMAX (ramka 0x35 i inne)
-│   ├── connection.py          # Połączenie TCP z EW11A, reconnect, żądania/odpowiedzi
-│   └── boiler_control.py      # Katalog parametrów sterowania kotłem
+│   ├── protocol.py            # Ramki ecoNET (CRC, budowa/rozpoznawanie ramek)
+│   ├── decoder.py             # Dekoder danych bieżących (ramka 0x35)
+│   ├── connection.py          # Połączenie TCP z EW11A, zapytania i odpowiedzi
+│   ├── boiler_control.py      # Katalog nastaw dostępnych w sterowaniu
+│   ├── ecomax_parameters.py   # Opis wszystkich parametrów sterownika ecoMAX P
+│   ├── mixer_parameters.py    # Opis parametrów mieszaczy
+│   ├── alarms.py              # Kody i nazwy alarmów, dekodowanie historii alarmów
+│   └── regdata.py             # Dane regulatora (ramka 0x08) i ich schemat
 ├── web/
 │   ├── app.py                 # Flask + SocketIO
 │   ├── routes.py              # REST API i routing stron
-│   ├── templates/             # Dashboard, Analiza, Parametry, Sterowanie, Alerty, Logi, Ustawienia
+│   ├── templates/             # Strony aplikacji
 │   └── static/                # CSS, JS, obrazy
-└── data/
-    ├── measurements.db        # Baza danych (tworzona automatycznie)
-    └── logs/                  # Logi aplikacji (tworzone automatycznie)
+├── tests/                     # Testy automatyczne (pytest)
+├── docs/                      # Plan i raport wdrożenia funkcji
+└── data/                      # Baza danych i logi (tworzone automatycznie)
 ```
 
 ## Protokół komunikacji (ecoNET)
 
-Aplikacja komunikuje się ze sterownikiem aktywnie, protokołem **ecoNET** używanym przez sterowniki ecoMAX:
+Aplikacja komunikuje się ze sterownikiem protokołem **ecoNET**, przedstawiając się jako moduł ecoNET (adres 0x56).
 
-- Format ramki: `[0x68][Długość:2 LE][DA][SA][Typ][Wersja 0x05][Payload][CRC XOR][0x16]`
-- Ramka `FRAME_DATA_ANS` (0x35) zawiera bieżące dane telemetryczne kotła
-- Obsługiwane są zapytania o parametry (`FRAME_GET_PARAMS`), zapis parametrów (`FRAME_SET_PARAM`), parametry mieszaczy i termostatów, harmonogramy tygodniowe (`FRAME_GET_SCHEDULES` / `FRAME_SET_SCHEDULE`), identyfikator urządzenia (`FRAME_GET_UID`) oraz alarmy
-- Aplikacja odpowiada na ramkę `FRAME_DEVICE_AVAILABLE` (0xB0), zgodnie z wymaganiami protokołu
+- Format ramki: `[0x68][Długość:2 LE][DA][SA][Typ][Wersja 0x05][Payload][CRC XOR][0x16]`.
+- Dane odbierane cyklicznie (co ok. 2 s): `0x35` — dane bieżące (tryb, wyjścia, temperatury, mieszacze, tabela wersji ramek) i `0x08` — dane regulatora (dekodowane wg schematu z `0x55`/`0xD5`).
+- Zapytania: parametry `0x31`, mieszacze `0x32`, parametry serwisowe `0x61`, harmonogramy `0x36`, UID `0x39`, historia alarmów `0x3D` (odpowiada panel, 10 wpisów na ramkę).
+- Zapisy: nastawy `0x33`, mieszacze `0x34`, termostaty `0x5D`, harmonogramy `0x37`, włączenie/wyłączenie kotła `0x3B`.
+- Zmiana wersji w tabeli wersji ramek oznacza, że coś zmieniło się w sterowniku (np. nastawy zmienione na panelu, nowy alarm) — aplikacja wtedy odczytuje odpowiednie dane ponownie.
+- Aplikacja odpowiada na ramkę `0x30` (sprawdzenie obecności) ramką `0xB0`.
 
-> Dekodowanie ramek ecoNET (typy ramek, struktura payloadu, obliczanie CRC) opiera się na wiedzy zgromadzonej w projekcie [homeassistant-plum-ecomax](https://github.com/denpamusic/homeassistant-plum-ecomax) — integracji Home Assistant dla sterowników Plum ecoMAX autorstwa [denpamusic](https://github.com/denpamusic). Dzięki temu repozytorium możliwe było odtworzenie protokołu bez oficjalnej dokumentacji producenta.
+> Dekodowanie protokołu opiera się na wiedzy zgromadzonej w projektach [PyPlumIO](https://github.com/denpamusic/PyPlumIO) i [homeassistant-plum-ecomax](https://github.com/denpamusic/homeassistant-plum-ecomax) autorstwa [denpamusic](https://github.com/denpamusic). Dzięki nim możliwe było odtworzenie protokołu bez oficjalnej dokumentacji producenta.
+
+## Testy
+
+Testy nie wymagają sprzętu — korzystają z prawdziwych, zanonimizowanych ramek nagranych z EW11A.
+
+```bash
+pip install pytest
+python -m pytest tests
+```
 
 ## Rozwiązywanie problemów
 
 ### Aplikacja nie łączy się z EW11A
 
-1. Sprawdź czy EW11A jest w sieci: `ping <IP_EW11A>` (adres IP ustawiony w `/settings`)
-2. Sprawdź port: `nc -zv <IP_EW11A> 8899`
-3. Sprawdź logi: `sudo journalctl -u ecomax-monitor -n 20` lub stronę `/logs`
-4. Sprawdź konfigurację EW11A (tryb TCP Server, port 8899, baud 115200) oraz `/settings` w aplikacji
+1. Sprawdź, czy EW11A jest w sieci: `ping <IP_EW11A>` (adres ustawiony w `/settings`).
+2. Sprawdź port: `nc -zv <IP_EW11A> 8899`.
+3. Sprawdź logi: `sudo journalctl -u ecomax-monitor -n 20` lub stronę `/logs`.
+4. Sprawdź konfigurację EW11A (tryb TCP Server, port 8899, baud 115200) oraz `/settings` w aplikacji.
 
-### Dashboard pokazuje brak połączenia
+### Panel pokazuje brak połączenia
 
-- Aplikacja automatycznie próbuje reconnect z rosnącym opóźnieniem (do 30 s)
-- Sprawdź logi — może być problem z siecią lub EW11A
+- Aplikacja automatycznie próbuje połączyć się ponownie z rosnącym opóźnieniem (do 30 s).
+- Sprawdź logi — może być problem z siecią lub EW11A.
 
-### Brak danych na wykresie
+### Brak danych na wykresach i w analizie
 
-- Dane są zapisywane do bazy co `db_save_interval` sekund (domyślnie 60, konfigurowalne w `/settings`)
-- Poczekaj minutę po uruchomieniu i odśwież stronę
+- Dane są zapisywane do bazy co `db_save_interval` sekund (domyślnie 60) — poczekaj minutę i odśwież stronę.
+- Statystyki dzienne (cykle pracy, rozpalenia) i wykres mieszacza są zbierane od pierwszego uruchomienia wersji, która je obsługuje.
+
+### Pusta historia alarmów sterownika albo brak „danych regulatora”
+
+- Import odbywa się w tle kilkanaście sekund po połączeniu (na wolnych kartach SD może potrwać do minuty).
+- Można go wymusić przyciskiem **Odczytaj ze sterownika** (Alerty) lub **Pobierz schemat** (Parametry).
+
+### Poziom paliwa pokazuje 0% i pojawia się alert o niskim poziomie
+
+Sterownik nie ma skalibrowanego poziomu paliwa. Zaznacz w Ustawieniach **„Poziom paliwa nie jest ustawiony w sterowniku”**.
 
 ### Port 5050 jest zajęty
 
