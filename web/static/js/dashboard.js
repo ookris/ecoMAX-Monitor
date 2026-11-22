@@ -324,6 +324,9 @@ function updateDashboard(data) {
     modeCard.classList.remove('alarm', 'off');
     if (data.mode === 8) modeCard.classList.add('alarm');
     else if (data.mode === 0) modeCard.classList.add('off');
+    const modeColor = (window.MODE_COLORS || {})[data.mode];
+    if (modeColor) modeCard.style.setProperty('--mode-color', modeColor);
+    else modeCard.style.removeProperty('--mode-color');
 
     // Temperatury
     setVal('val-temp-co', formatTemp(data.temp_co));
@@ -347,6 +350,12 @@ function updateDashboard(data) {
     setVal('val-fuel-stream', formatVal(data.fuel_stream));
     setVal('val-fuel-level', formatVal(data.fuel_level));
 
+    // Wskaźniki: temperatura względem zadanej, procent pracy
+    setGauge('gauge-temp-co', data.temp_co, data.temp_co_set, GAUGE_MAX_CO);
+    setGauge('gauge-temp-cwu', data.temp_cwu, data.temp_cwu_set, GAUGE_MAX_CWU);
+    setMeter('meter-boiler-power', data.boiler_power);
+    setMeter('meter-fan-power', data.fan_power);
+
     // Sprawność obiegu
     updateEfficiency(data);
 
@@ -363,6 +372,33 @@ function updateDashboard(data) {
         setVal('val-work-100', data.work_time_100 || '--');
         setVal('val-work-50', data.work_time_50 || '--');
     }
+}
+
+const GAUGE_MAX_CO = 90;
+const GAUGE_MAX_CWU = 70;
+
+function _pct(value, max) {
+    if (value === null || value === undefined || !Number.isFinite(Number(value))) return null;
+    return Math.max(0, Math.min(100, (Number(value) / max) * 100));
+}
+
+function setGauge(id, value, target, max) {
+    const fill = document.getElementById(id);
+    const marker = document.getElementById(id + '-target');
+    const valuePct = _pct(value, max);
+    const targetPct = _pct(target, max);
+    if (fill) fill.style.width = valuePct === null ? '0%' : valuePct + '%';
+    if (marker) {
+        marker.style.display = targetPct === null ? 'none' : '';
+        if (targetPct !== null) marker.style.left = targetPct + '%';
+    }
+}
+
+function setMeter(id, value) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    const pct = _pct(value, 100);
+    el.style.width = pct === null ? '0%' : pct + '%';
 }
 
 function setVal(id, value) {
@@ -385,6 +421,21 @@ function setTempStatsText(id, text) {
     if (el) el.textContent = text;
 }
 
+function setTempStats(id, min, max, avg) {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = '';
+    el.title = 'Ostatnie 24 h';
+    [['min', min], ['max', max], ['śr.', avg]].forEach(([label, value]) => {
+        const item = document.createElement('span');
+        item.append(label + ' ');
+        const strong = document.createElement('b');
+        strong.textContent = formatTempStat(value);
+        item.appendChild(strong);
+        el.appendChild(item);
+    });
+}
+
 function formatTempStat(val) {
     if (!Number.isFinite(val)) return '--';
     return Number(val).toFixed(1);
@@ -392,7 +443,7 @@ function formatTempStat(val) {
 
 function setNoTempStats() {
     TEMP_STATS_DEF.forEach(({ id }) => {
-        setTempStatsText(id, 'min: -- / max: -- / śr: -- °C');
+        setTempStats(id, NaN, NaN, NaN);
     });
 }
 
@@ -413,14 +464,11 @@ async function loadTempStats24h() {
             const stats = statsData[key];
 
             if (!stats || !Number.isFinite(stats.min) || !Number.isFinite(stats.max) || !Number.isFinite(stats.avg)) {
-                setTempStatsText(id, 'min: -- / max: -- / śr: -- °C');
+                setTempStats(id, NaN, NaN, NaN);
                 return;
             }
 
-            setTempStatsText(
-                id,
-                `min: ${formatTempStat(stats.min)} / max: ${formatTempStat(stats.max)} / śr: ${formatTempStat(stats.avg)} °C`
-            );
+            setTempStats(id, stats.min, stats.max, stats.avg);
         });
     } catch (e) {
         console.warn('loadTempStats24h: błąd pobierania statystyk:', e);
@@ -448,29 +496,55 @@ function updateConnectionStatus(connected) {
 }
 
 // ---- Wykres ----
+function cssVar(name, fallback) {
+    const v = getComputedStyle(document.documentElement).getPropertyValue(name);
+    return v && v.trim() ? v.trim() : fallback;
+}
+
 const DATASETS_DEF = [
-    { label: 'Temp. CO',      color: '#f0a500', key: 'temp_co',      yAxis: 'yTemp' },
-    { label: 'Temp. CWU',     color: '#3498db', key: 'temp_cwu',     yAxis: 'yTemp' },
-    { label: 'Temp. powrotu', color: '#2ecc71', key: 'temp_back',    yAxis: 'yTemp' },
-    { label: 'Temp. spalin',  color: '#e94560', key: 'temp_flue_gas',yAxis: 'yTemp' },
-    { label: 'Moc kotła (%)', color: '#9b59b6', key: 'boiler_power', yAxis: 'yPct'  },
-    { label: 'Wentylator (%)',color: '#00bcd4', key: 'fan_power',    yAxis: 'yPct'  },
-    { label: 'Paliwo (kg/h)', color: '#8e44ad', key: 'fuel_stream',  yAxis: 'yFuel' },
+    { label: 'Zasilanie CO',  color: '#d9480f', cssColor: '--series-1', key: 'temp_co',      yAxis: 'yTemp' },
+    { label: 'CWU',           color: '#1c7ed6', cssColor: '--series-2', key: 'temp_cwu',     yAxis: 'yTemp' },
+    { label: 'Powrót',        color: '#0ca678', cssColor: '--series-3', key: 'temp_back',    yAxis: 'yTemp' },
+    { label: 'Spaliny',       color: '#868e96', cssColor: '--series-4', key: 'temp_flue_gas',yAxis: 'yTemp' },
+    { label: 'Moc kotła (%)', color: '#f59f00', cssColor: '--series-5', key: 'boiler_power', yAxis: 'yPct'  },
+    { label: 'Wentylator (%)',color: '#7048e8', cssColor: '--series-6', key: 'fan_power',    yAxis: 'yPct'  },
+    { label: 'Paliwo (kg/h)', color: '#a61e4d', cssColor: '--series-7', key: 'fuel_stream',  yAxis: 'yFuel' },
 ];
 
 function chartGridColor() {
-    return document.documentElement.getAttribute('data-theme') === 'dark'
-        ? 'rgba(255,255,255,0.12)'
-        : 'rgba(0,0,0,0.09)';
+    return cssVar('--chart-grid', 'rgba(0,0,0,0.08)');
+}
+
+function chartTickColor() {
+    return cssVar('--text-secondary', '#5e6b74');
+}
+
+function seriesColor(def) {
+    return cssVar(def.cssColor, def.color);
+}
+
+function withAlpha(color, alpha) {
+    const hex = String(color).trim();
+    if (/^#[0-9a-f]{6}$/i.test(hex)) {
+        const n = parseInt(hex.slice(1), 16);
+        return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+    }
+    return color;
 }
 
 function updateChartGridColors() {
     if (!tempChart) return;
-    const color = chartGridColor();
-    ['x', 'yTemp'].forEach(id => {
-        if (tempChart.options.scales[id]) {
-            tempChart.options.scales[id].grid.color = color;
-        }
+    const grid = chartGridColor();
+    const tick = chartTickColor();
+    Object.values(tempChart.options.scales).forEach(scale => {
+        if (scale.grid && scale.grid.drawOnChartArea !== false) scale.grid.color = grid;
+        if (scale.ticks) scale.ticks.color = tick;
+        if (scale.title) scale.title.color = tick;
+    });
+    tempChart.data.datasets.forEach((ds, i) => {
+        const c = seriesColor(DATASETS_DEF[i]);
+        ds.borderColor = c;
+        ds.backgroundColor = withAlpha(c, 0.08);
     });
     tempChart.update('none');
 }
@@ -480,17 +554,22 @@ new MutationObserver(updateChartGridColors)
 
 function initChart() {
     const ctx = document.getElementById('temp-chart').getContext('2d');
+    const tick = chartTickColor();
+    const grid = chartGridColor();
+    const font = { family: "'IBM Plex Sans', system-ui, sans-serif", size: 12 };
     tempChart = new Chart(ctx, {
         type: 'line',
         data: {
             labels: [],
             datasets: DATASETS_DEF.map(d => ({
                 label: d.label,
-                borderColor: d.color,
-                backgroundColor: d.color.replace(')', ',0.1)').replace('rgb', 'rgba'),
+                borderColor: seriesColor(d),
+                backgroundColor: withAlpha(seriesColor(d), 0.08),
+                borderWidth: 2,
                 data: [],
                 tension: 0.3,
                 pointRadius: 0,
+                pointHoverRadius: 4,
                 yAxisID: d.yAxis,
                 hidden: ['yPct','yFuel'].includes(d.yAxis),
             })),
@@ -500,8 +579,15 @@ function initChart() {
             maintainAspectRatio: false,
             interaction: { intersect: false, mode: 'index' },
             plugins: {
-                legend: { labels: { color: '#a0a0a0', font: { size: 12 } } },
-                tooltip: { backgroundColor: 'rgba(0,0,0,0.8)' },
+                legend: { display: false },
+                tooltip: {
+                    backgroundColor: 'rgba(23,32,38,0.92)',
+                    titleFont: font,
+                    bodyFont: font,
+                    padding: 10,
+                    cornerRadius: 6,
+                    boxPadding: 4,
+                },
                 zoom: {
                     zoom: {
                         wheel: { enabled: true },
@@ -513,25 +599,31 @@ function initChart() {
             },
             scales: {
                 x: {
-                    ticks: { color: '#666', maxTicksLimit: 12 },
-                    grid: { color: chartGridColor() },
+                    ticks: { color: tick, maxTicksLimit: 10, font },
+                    grid: { color: grid, drawTicks: false },
+                    border: { display: false },
                 },
                 yTemp: {
                     type: 'linear', position: 'left',
-                    ticks: { color: '#666' },
-                    grid: { color: chartGridColor() },
-                    title: { display: true, text: 'Temperatura (°C)', color: '#666' },
+                    ticks: { color: tick, font, padding: 8 },
+                    grid: { color: grid, drawTicks: false },
+                    border: { display: false },
+                    title: { display: true, text: '°C', color: tick, font },
                 },
                 yPct: {
                     type: 'linear', position: 'right', display: false,
                     min: 0, max: 100,
+                    ticks: { color: tick, font },
                     grid: { drawOnChartArea: false },
-                    title: { display: true, text: '(%)', color: '#666' },
+                    border: { display: false },
+                    title: { display: true, text: '%', color: tick, font },
                 },
                 yFuel: {
                     type: 'linear', position: 'right', display: false,
+                    ticks: { color: tick, font },
                     grid: { drawOnChartArea: false },
-                    title: { display: true, text: 'kg/h', color: '#666' },
+                    border: { display: false },
+                    title: { display: true, text: 'kg/h', color: tick, font },
                 },
             },
         },
@@ -843,7 +935,7 @@ async function pollData() {
         if (json.connection) {
             setVal('footer-frames', json.connection.frames_received || 0);
             const bytes = json.connection.bytes_received || 0;
-            setVal('footer-bytes', bytes > 1024 ? (bytes / 1024).toFixed(1) + ' KB' : bytes);
+            setVal('footer-bytes', bytes > 1024 ? (bytes / 1024).toFixed(1) + ' KB' : bytes + ' B');
             updateConnectionStatus(json.connection.connected);
         }
     } catch (e) {

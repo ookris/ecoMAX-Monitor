@@ -1,67 +1,40 @@
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ecoMAX Monitor - Parametry kotła</title>
-    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
-    <script>
-        (function () { if (localStorage.getItem('theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); })();
-    </script>
-    <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-</head>
-<body>
-    <header>
-        <h1><a href="/" class="brand-link"><img src="/static/img/logo.svg?v={{ asset_version }}" alt="" class="brand-logo">ecoMAX Monitor - Parametry kotła</a></h1>
-        <div class="header-actions">
-            <div id="connection-status" class="status disconnected">
-                <span class="dot"></span>
-                <span id="status-text">Rozłączony</span>
-            </div>
-            <button id="btn-theme" class="btn-theme" onclick="toggleTheme()" title="Przełącz na tryb ciemny"><iconify-icon icon="mdi:weather-night"></iconify-icon></button>
-            {% set active_page = 'parameters' %}
-            {% include '_menu_dropdown.html' %}
+{% extends 'base.html' %}
+{% set active_page = 'parameters' %}
+{% set show_connection = true %}
+
+{% block title %}ecoMAX Monitor – Parametry kotła{% endblock %}
+{% block page_title %}Parametry{% endblock %}
+{% block page_subtitle %}<p class="topbar-sub">Wszystkie wartości odczytywane ze sterownika, tylko do odczytu</p>{% endblock %}
+
+{% block content %}
+    <div id="parameters-msg" class="settings-msg" style="display:none"></div>
+
+    <section class="settings-section">
+        <div class="panel-head parameters-header">
+            <p class="settings-note">Pełen zestaw danych zwracanych przez sterownik. Widok odświeża się automatycznie co 5 sekund.</p>
+            <button class="btn-secondary" onclick="refreshParameters()"><iconify-icon icon="mdi:refresh"></iconify-icon> Odśwież teraz</button>
         </div>
-    </header>
 
-    <main>
-        <div id="parameters-msg" class="settings-msg" style="display:none"></div>
+        <div class="parameters-table-wrap">
+            <table class="parameters-table">
+                <thead>
+                    <tr>
+                        <th>Parametr</th>
+                        <th>Klucz</th>
+                        <th>Wartość</th>
+                        <th>Jednostka</th>
+                    </tr>
+                </thead>
+                <tbody id="parameters-body">
+                    <tr>
+                        <td colspan="4" class="parameters-empty">Ładowanie danych...</td>
+                    </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+{% endblock %}
 
-        <section class="settings-section">
-            <div class="parameters-header">
-                <div>
-                    <h2>Wszystkie dostępne parametry (tylko odczyt)</h2>
-                    <p class="settings-note">Widok zawiera pełen zestaw danych udostępnianych przez dekoder. Strona odświeża się automatycznie co 5 sekund.</p>
-                </div>
-                <button class="btn-secondary" onclick="refreshParameters()">Odśwież teraz</button>
-            </div>
-
-            <div class="parameters-table-wrap">
-                <table class="parameters-table">
-                    <thead>
-                        <tr>
-                            <th>Parametr</th>
-                            <th>Klucz</th>
-                            <th>Wartość</th>
-                            <th>Jednostka</th>
-                        </tr>
-                    </thead>
-                    <tbody id="parameters-body">
-                        <tr>
-                            <td colspan="4" class="parameters-empty">Ładowanie danych...</td>
-                        </tr>
-                    </tbody>
-                </table>
-            </div>
-        </section>
-    </main>
-
-    <footer>
-        <span>ecoMAX Monitor | <a href="/">Dashboard</a> | <a href="/settings">Ustawienia</a></span>
-    </footer>
-
+{% block scripts %}
     <script src="/static/js/parameters.js?v={{ asset_version }}"></script>
-    <script src="/static/js/nav.js?v={{ asset_version }}"></script>
-    <script src="/static/js/theme.js?v={{ asset_version }}"></script>
-</body>
-</html>
+{% endblock %}

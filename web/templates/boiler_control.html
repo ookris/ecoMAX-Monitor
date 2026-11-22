@@ -1,173 +1,154 @@
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ecoMAX Monitor - Sterowanie kotłem</title>
-    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
-    <script>
-        (function () { if (localStorage.getItem('theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); })();
-    </script>
-    <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-</head>
-<body>
-    <header>
-        <h1><a href="/" class="brand-link"><img src="/static/img/logo.svg?v={{ asset_version }}" alt="" class="brand-logo">ecoMAX Monitor</a></h1>
-        <div class="header-actions">
-            <button id="btn-theme" class="btn-theme" onclick="toggleTheme()" title="Przełącz na tryb ciemny"><iconify-icon icon="mdi:weather-night"></iconify-icon></button>
-            {% set active_page = 'boiler-control' %}
-            {% include '_menu_dropdown.html' %}
+{% extends 'base.html' %}
+{% set active_page = 'boiler-control' %}
+{% set show_connection = false %}
+
+{% block title %}ecoMAX Monitor – Sterowanie kotłem{% endblock %}
+{% block page_title %}Sterowanie{% endblock %}
+{% block page_subtitle %}<p class="topbar-sub">Nastawy sterownika, harmonogramy i historia zmian</p>{% endblock %}
+
+{% block content %}
+    <div id="boiler-control-msg" class="settings-msg" style="display:none"></div>
+
+    <section class="settings-section">
+        <div class="panel-head">
+            <div>
+                <h2>Nastawy kotła</h2>
+                <p class="settings-hint">Zmiany są zapisywane w sterowniku pojedynczo, z kontrolą dozwolonego zakresu.</p>
+            </div>
+            <div class="boiler-view-mode segmented" id="boiler-view-mode" role="group" aria-label="Profil widoku">
+                <button type="button" class="btn-secondary" id="btn-profile-user">Użytkownik</button>
+                <button type="button" class="btn-secondary" id="btn-profile-installer">Instalator</button>
+                <button type="button" class="btn-secondary" id="btn-profile-service" style="display:none;">Serwis</button>
+            </div>
         </div>
-    </header>
+        <div class="boiler-service-access" id="boiler-service-access" style="display:none;">
+            <label for="service_token_input">Token serwisowy</label>
+            <input type="password" id="service_token_input" placeholder="Wprowadź token serwisowy">
+            <button type="button" class="btn-secondary" id="btn-service-unlock">Odblokuj profil serwis</button>
+            <button type="button" class="btn-secondary" id="btn-service-clear" style="display:none;">Usuń token serwisowy</button>
+        </div>
+        <div id="boiler-control-list" class="settings-grid control-grid"></div>
+    </section>
 
-    <main>
-        <section class="settings-section">
-            <h2>Sterowanie ustawieniami kotła</h2>
-            <p class="settings-note">MVP: zapis pojedynczych, bezpiecznych parametrów użytkownika z walidacją zakresów.</p>
-            <div id="boiler-control-msg" class="settings-msg" style="display:none"></div>
-        </section>
-
-        <section class="settings-section">
-            <h2>Dostępne parametry</h2>
-            <div class="boiler-view-mode" id="boiler-view-mode">
-                <button type="button" class="btn-secondary" id="btn-profile-user">Profil użytkownik</button>
-                <button type="button" class="btn-secondary" id="btn-profile-installer">Profil instalator</button>
-                <button type="button" class="btn-secondary" id="btn-profile-service" style="display:none;">Profil serwis</button>
+    <section class="settings-section" data-min-profile="service">
+        <h2>Tryb ekspercki: mieszacze i termostaty</h2>
+        <p class="settings-note">Używaj ostrożnie. Wymagana znajomość indeksów parametrów i zakresów wartości.</p>
+        <div class="settings-grid">
+            <div class="settings-field">
+                <label for="expert_target_type">Typ celu</label>
+                <select id="expert_target_type">
+                    <option value="mixer">mixer</option>
+                    <option value="thermostat">thermostat</option>
+                </select>
             </div>
-            <div class="boiler-service-access" id="boiler-service-access" style="display:none;">
-                <label for="service_token_input">Token serwisowy</label>
-                <input type="password" id="service_token_input" placeholder="Wprowadź token serwisowy">
-                <button type="button" class="btn-secondary" id="btn-service-unlock">Odblokuj profil serwis</button>
-                <button type="button" class="btn-secondary" id="btn-service-clear" style="display:none;">Usuń token serwisowy</button>
+            <div class="settings-field">
+                <label for="expert_target_index">target_index (np. indeks mieszacza)</label>
+                <input type="number" id="expert_target_index" min="0" max="255" step="1" value="0">
             </div>
-            <div id="boiler-control-list" class="settings-grid"></div>
-        </section>
-
-        <section class="settings-section" data-min-profile="service">
-            <h2>Tryb ekspercki (mixer/thermostat)</h2>
-            <p class="settings-note">Używaj ostrożnie. Wymagana znajomość indeksów parametrów i zakresów wartości.</p>
-            <div class="settings-grid">
-                <div class="settings-field">
-                    <label for="expert_target_type">Typ celu</label>
-                    <select id="expert_target_type">
-                        <option value="mixer">mixer</option>
-                        <option value="thermostat">thermostat</option>
-                    </select>
-                </div>
-                <div class="settings-field">
-                    <label for="expert_target_index">target_index (np. indeks mieszacza)</label>
-                    <input type="number" id="expert_target_index" min="0" max="255" step="1" value="0">
-                </div>
-                <div class="settings-field">
-                    <label for="expert_index">index parametru</label>
-                    <input type="number" id="expert_index" min="0" max="255" step="1" value="0">
-                </div>
-                <div class="settings-field">
-                    <label for="expert_value">value</label>
-                    <input type="number" id="expert_value" min="0" max="65535" step="1" value="0">
-                </div>
-                <div class="settings-field">
-                    <label for="expert_offset">offset (thermostat)</label>
-                    <input type="number" id="expert_offset" min="0" max="255" step="1" value="0">
-                </div>
-                <div class="settings-field">
-                    <label for="expert_size">size bajtów (thermostat)</label>
-                    <input type="number" id="expert_size" min="1" max="4" step="1" value="1">
-                </div>
+            <div class="settings-field">
+                <label for="expert_index">index parametru</label>
+                <input type="number" id="expert_index" min="0" max="255" step="1" value="0">
             </div>
-            <div style="margin-top: 1rem;">
-                <button class="btn-secondary btn-danger" onclick="saveExpertParameter()">Zapisz parametr (ekspercki)</button>
+            <div class="settings-field">
+                <label for="expert_value">value</label>
+                <input type="number" id="expert_value" min="0" max="65535" step="1" value="0">
             </div>
-        </section>
-
-        <section class="settings-section">
-            <h2>Historia zmian ustawień</h2>
-            <div style="margin-bottom: 0.8rem;">
-                <button class="btn-secondary" onclick="loadBoilerControlHistory()">Odśwież historię</button>
+            <div class="settings-field">
+                <label for="expert_offset">offset (thermostat)</label>
+                <input type="number" id="expert_offset" min="0" max="255" step="1" value="0">
             </div>
-            <div class="parameters-table-wrap">
-                <table class="parameters-table">
-                    <thead>
-                        <tr>
-                            <th>Czas</th>
-                            <th>Target</th>
-                            <th>Parametr</th>
-                            <th>Zmiana</th>
-                            <th>Status</th>
-                            <th>Info</th>
-                        </tr>
-                    </thead>
-                    <tbody id="boiler-control-history-body">
-                        <tr><td colspan="6" class="parameters-empty">Brak danych.</td></tr>
-                    </tbody>
-                </table>
+            <div class="settings-field">
+                <label for="expert_size">size bajtów (thermostat)</label>
+                <input type="number" id="expert_size" min="1" max="4" step="1" value="1">
             </div>
-        </section>
+        </div>
+        <div class="section-actions">
+            <button class="btn-secondary btn-danger" onclick="saveExpertParameter()">Zapisz parametr (ekspercki)</button>
+        </div>
+    </section>
 
-        <section class="settings-section" data-min-profile="installer">
-            <h2>Harmonogramy (po ludzku)</h2>
-            <p class="settings-note">Kliknij półgodzinne sloty w siatce tygodnia. Każdy aktywny segment oznacza pracę w danym przedziale.</p>
+    <section class="settings-section">
+        <h2>Historia zmian ustawień</h2>
+        <div class="section-actions section-actions-top">
+            <button class="btn-secondary" onclick="loadBoilerControlHistory()">Odśwież historię</button>
+        </div>
+        <div class="parameters-table-wrap">
+            <table class="parameters-table">
+                <thead>
+                    <tr>
+                        <th>Czas</th>
+                        <th>Target</th>
+                        <th>Parametr</th>
+                        <th>Zmiana</th>
+                        <th>Status</th>
+                        <th>Info</th>
+                    </tr>
+                </thead>
+                <tbody id="boiler-control-history-body">
+                    <tr><td colspan="6" class="parameters-empty">Brak danych.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
 
-            <div class="settings-grid">
-                <div class="settings-field">
-                    <label for="schedule_type_select">Typ harmonogramu</label>
-                    <select id="schedule_type_select"></select>
-                </div>
+    <section class="settings-section" data-min-profile="installer">
+        <h2>Harmonogramy tygodniowe</h2>
+        <p class="settings-note">Kliknij półgodzinne sloty w siatce tygodnia. Każdy aktywny segment oznacza pracę w danym przedziale.</p>
 
-                <div class="settings-field">
-                    <label for="schedule_parameter">Parametr harmonogramu</label>
-                    <input type="number" id="schedule_parameter" min="0" max="255" step="1" value="0">
-                    <span id="schedule_parameter_range" class="settings-hint">Zakres parametru: 0-255</span>
-                </div>
+        <div class="settings-grid">
+            <div class="settings-field">
+                <label for="schedule_type_select">Typ harmonogramu</label>
+                <select id="schedule_type_select"></select>
+            </div>
 
-                <div class="settings-field">
-                    <label for="schedule_switch">Harmonogram aktywny</label>
-                    <div style="margin-top: 0.5rem;">
-                        <input type="checkbox" id="schedule_switch" checked>
-                    </div>
-                </div>
+            <div class="settings-field">
+                <label for="schedule_parameter">Parametr harmonogramu</label>
+                <input type="number" id="schedule_parameter" min="0" max="255" step="1" value="0">
+                <span id="schedule_parameter_range" class="settings-hint">Zakres parametru: 0-255</span>
+            </div>
 
-                <div class="settings-field" style="grid-column: 1 / -1;">
-                    <label>Akcje tygodnia</label>
-                    <div>
-                        <button class="btn-secondary" type="button" onclick="clearScheduleGrid()">Wyczyść cały tydzień</button>
-                    </div>
-                </div>
-
-                <div class="settings-field" style="grid-column: 1 / -1;">
-                    <label>Siatka tygodnia (24h, krok 30 min)</label>
-                    <div id="schedule-grid-root" class="schedule-grid-root"></div>
+            <div class="settings-field">
+                <label for="schedule_switch">Harmonogram aktywny</label>
+                <div>
+                    <input type="checkbox" id="schedule_switch" checked>
                 </div>
             </div>
 
-            <div style="margin-top: 0.8rem;">
-                <button class="btn-secondary" onclick="loadScheduleSemantic()">Pobierz harmonogram</button>
-                <button class="btn-secondary btn-danger" onclick="saveScheduleSemantic()">Zapisz harmonogram</button>
-            </div>
-        </section>
-
-        <section class="settings-section" data-min-profile="service">
-            <h2>Harmonogramy (raw)</h2>
-            <p class="settings-note">Tryb zaawansowany: odczyt/zapis surowego payloadu hex dla ramek 0x36/0x37.</p>
-            <div class="settings-grid">
-                <div class="settings-field" style="grid-column: 1 / -1;">
-                    <label for="schedule_payload_hex">Payload HEX (bez nagłówka ramki)</label>
-                    <textarea id="schedule_payload_hex" rows="4" style="background: var(--bg-card); color: var(--text-primary); border: 1px solid var(--border-color); border-radius: 8px; padding: 8px 12px; font-size: 0.9rem; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;"></textarea>
+            <div class="settings-field span-all">
+                <label>Akcje tygodnia</label>
+                <div>
+                    <button class="btn-secondary" type="button" onclick="clearScheduleGrid()">Wyczyść cały tydzień</button>
                 </div>
             </div>
-            <div style="margin-top: 0.8rem;">
-                <button class="btn-secondary" onclick="readScheduleRaw()">Pobierz harmonogramy (raw)</button>
-                <button class="btn-secondary btn-danger" onclick="writeScheduleRaw()">Wyślij harmonogramy (raw)</button>
+
+            <div class="settings-field span-all">
+                <label>Siatka tygodnia (24h, krok 30 min)</label>
+                <div id="schedule-grid-root" class="schedule-grid-root"></div>
             </div>
-        </section>
-    </main>
+        </div>
 
-    <footer>
-        <span>ecoMAX Monitor | <a href="/">Dashboard</a> | <a href="/settings">Ustawienia</a></span>
-    </footer>
+        <div class="section-actions">
+            <button class="btn-secondary" onclick="loadScheduleSemantic()">Pobierz harmonogram</button>
+            <button class="btn-secondary btn-danger" onclick="saveScheduleSemantic()">Zapisz harmonogram</button>
+        </div>
+    </section>
 
+    <section class="settings-section" data-min-profile="service">
+        <h2>Harmonogramy – surowe dane</h2>
+        <p class="settings-note">Tryb zaawansowany: odczyt/zapis surowego payloadu hex dla ramek 0x36/0x37.</p>
+        <div class="settings-grid">
+            <div class="settings-field span-all">
+                <label for="schedule_payload_hex">Payload HEX (bez nagłówka ramki)</label>
+                <textarea id="schedule_payload_hex" rows="4" class="mono"></textarea>
+            </div>
+        </div>
+        <div class="section-actions">
+            <button class="btn-secondary" onclick="readScheduleRaw()">Pobierz harmonogramy (raw)</button>
+            <button class="btn-secondary btn-danger" onclick="writeScheduleRaw()">Wyślij harmonogramy (raw)</button>
+        </div>
+    </section>
+{% endblock %}
+
+{% block scripts %}
     <script src="/static/js/boiler_control.js?v={{ asset_version }}"></script>
-    <script src="/static/js/nav.js?v={{ asset_version }}"></script>
-    <script src="/static/js/theme.js?v={{ asset_version }}"></script>
-</body>
-</html>
+{% endblock %}

@@ -1,55 +1,38 @@
-<!DOCTYPE html>
-<html lang="pl">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ecoMAX Monitor - Alerty</title>
-    <link rel="stylesheet" href="/static/css/style.css?v={{ asset_version }}">
-    <script>
-        (function () { if (localStorage.getItem('theme') === 'dark') document.documentElement.setAttribute('data-theme', 'dark'); })();
-    </script>
-    <script src="https://code.iconify.design/iconify-icon/2.1.0/iconify-icon.min.js"></script>
-</head>
-<body>
-    <header>
-        <h1><a href="/" class="brand-link"><img src="/static/img/logo.svg?v={{ asset_version }}" alt="" class="brand-logo">ecoMAX Monitor - Alerty</a></h1>
-        <div class="header-actions">
-            <button id="btn-theme" class="btn-theme" onclick="toggleTheme()" title="Przełącz na tryb ciemny"><iconify-icon icon="mdi:weather-night"></iconify-icon></button>
-            {% set active_page = 'alerts' %}
-            {% include '_menu_dropdown.html' %}
-        </div>
-    </header>
+{% extends 'base.html' %}
+{% set active_page = 'alerts' %}
+{% set show_connection = false %}
 
-    <main>
-        <div id="alerts-msg" class="settings-msg" style="display:none"></div>
+{% block title %}ecoMAX Monitor – Alerty{% endblock %}
+{% block page_title %}Alerty{% endblock %}
+{% block page_subtitle %}<p class="topbar-sub">Zdarzenia wykryte w pracy kotła i połączeniu z modułem</p>{% endblock %}
 
-        <section class="alerts-section alerts-section-page">
-            <h2>Wszystkie alerty</h2>
-            <div id="alerts-limit-info" class="settings-msg" style="display:none"></div>
-            <div class="alerts-section-actions">
-                <div class="alerts-filters">
-                    <label class="alerts-filter-checkbox">
-                        <input type="checkbox" id="alerts-unread-only">
-                        Tylko nieprzeczytane
-                    </label>
-                    <label for="alerts-type-filter">Typ:</label>
+{% block content %}
+    <div id="alerts-msg" class="settings-msg" style="display:none"></div>
+
+    <section class="panel alerts-section alerts-section-page">
+        <div id="alerts-limit-info" class="settings-msg" style="display:none"></div>
+        <div class="toolbar">
+            <div class="alerts-filters">
+                <label class="check">
+                    <input type="checkbox" id="alerts-unread-only">
+                    <span>Tylko nieprzeczytane</span>
+                </label>
+                <label class="field-inline">
+                    <span>Typ</span>
                     <select id="alerts-type-filter" class="alerts-filter-select">
                         <option value="all">Wszystkie</option>
                     </select>
-                </div>
-                <button class="btn-secondary" onclick="loadAllAlerts()">Odśwież</button>
-                <button class="btn-secondary" onclick="markAllAlertsRead()">Oznacz wszystkie jako przeczytane</button>
+                </label>
             </div>
-            <div id="alerts-list" class="alerts-list alerts-list-visible"></div>
-        </section>
-    </main>
+            <div class="toolbar-actions">
+                <button class="btn-secondary" onclick="loadAllAlerts()"><iconify-icon icon="mdi:refresh"></iconify-icon> Odśwież</button>
+                <button class="btn-secondary" onclick="markAllAlertsRead()"><iconify-icon icon="mdi:check-all"></iconify-icon> Oznacz wszystkie jako przeczytane</button>
+            </div>
+        </div>
+        <div id="alerts-list" class="alerts-list alerts-list-visible"></div>
+    </section>
+{% endblock %}
 
-    <footer>
-        <span>ecoMAX Monitor | <a href="/">Dashboard</a> | <a href="/settings">Ustawienia</a></span>
-    </footer>
-
+{% block scripts %}
     <script src="/static/js/alerts.js?v={{ asset_version }}"></script>
-    <script src="/static/js/nav.js?v={{ asset_version }}"></script>
-    <script src="/static/js/theme.js?v={{ asset_version }}"></script>
-</body>
-</html>
+{% endblock %}

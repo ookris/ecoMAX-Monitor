@@ -52,10 +52,7 @@ def _control_mode_map() -> dict[int, str]:
 
 
 def _program_control_map() -> dict[int, str]:
-    return {
-        0: "Stała temperatura",
-        1: "Program tygodniowy",
-    }
+    return {i: f"Program {i}" for i in range(1, 41)}
 
 
 def _thermostat_boiler_mode_map() -> dict[int, str]:
@@ -226,16 +223,16 @@ PARAMETERS: tuple[BoilerControlParameter, ...] = (
     BoilerControlParameter(
         key="PROGRAM_CONTROL_CO",
         label="Program tygodniowy CO",
-        description="Sposób sterowania temperaturą CO: stała lub harmonogram.",
+        description="Numer aktywnego programu tygodniowego CO (1-40).",
         group="Tryby pracy",
         index=107,
-        min_value=0,
-        max_value=1,
+        min_value=1,
+        max_value=40,
         step=1,
         unit=None,
-        widget="select",
-        ha_entity_id="select.program_control_co",
-        ha_entity_type="select",
+        widget="number",
+        ha_entity_id="number.program_control_co",
+        ha_entity_type="number",
         ui_profile="user",
         value_map=_program_control_map(),
     ),

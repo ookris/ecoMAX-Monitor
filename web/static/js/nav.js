@@ -1,51 +1,30 @@
-function closeNavMenu(dropdown) {
-    const menu = dropdown.querySelector('[data-nav-menu]');
-    const toggle = dropdown.querySelector('[data-nav-toggle]');
-    if (!menu || !toggle) return;
-    menu.classList.remove('open');
-    toggle.setAttribute('aria-expanded', 'false');
-}
-
-function openNavMenu(dropdown) {
-    const menu = dropdown.querySelector('[data-nav-menu]');
-    const toggle = dropdown.querySelector('[data-nav-toggle]');
-    if (!menu || !toggle) return;
-    menu.classList.add('open');
-    toggle.setAttribute('aria-expanded', 'true');
-}
-
+/**
+ * ecoMAX Monitor - boczny panel nawigacji.
+ * Na szerokich ekranach panel jest stale widoczny; na wąskich
+ * wysuwa się po kliknięciu przycisku menu w górnym pasku.
+ */
 document.addEventListener('DOMContentLoaded', () => {
-    const dropdowns = Array.from(document.querySelectorAll('[data-nav-dropdown]'));
-    if (!dropdowns.length) return;
+    const toggle = document.querySelector('[data-sidebar-toggle]');
+    const closers = document.querySelectorAll('[data-sidebar-close]');
+    const sidebar = document.getElementById('sidebar');
+    if (!toggle || !sidebar) return;
 
-    dropdowns.forEach((dropdown) => {
-        const toggle = dropdown.querySelector('[data-nav-toggle]');
-        const menu = dropdown.querySelector('[data-nav-menu]');
-        if (!toggle || !menu) return;
+    const setOpen = (open) => {
+        document.body.classList.toggle('nav-open', open);
+        toggle.setAttribute('aria-expanded', open ? 'true' : 'false');
+        toggle.setAttribute('aria-label', open ? 'Ukryj menu' : 'Pokaż menu');
+    };
 
-        toggle.addEventListener('click', (event) => {
-            event.preventDefault();
-            const isOpen = menu.classList.contains('open');
-            dropdowns.forEach(closeNavMenu);
-            if (!isOpen) openNavMenu(dropdown);
-        });
-
-        menu.querySelectorAll('a').forEach((link) => {
-            link.addEventListener('click', () => closeNavMenu(dropdown));
-        });
+    toggle.addEventListener('click', () => {
+        setOpen(!document.body.classList.contains('nav-open'));
     });
 
-    document.addEventListener('click', (event) => {
-        dropdowns.forEach((dropdown) => {
-            if (!dropdown.contains(event.target)) {
-                closeNavMenu(dropdown);
-            }
-        });
+    closers.forEach((el) => el.addEventListener('click', () => setOpen(false)));
+    sidebar.querySelectorAll('a').forEach((link) => {
+        link.addEventListener('click', () => setOpen(false));
     });
 
     document.addEventListener('keydown', (event) => {
-        if (event.key === 'Escape') {
-            dropdowns.forEach(closeNavMenu);
-        }
+        if (event.key === 'Escape') setOpen(false);
     });
 });

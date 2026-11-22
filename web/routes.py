@@ -1704,7 +1704,15 @@ def get_boiler_control_schedules_raw():
 
     try:
         data = _execute_blocking(_connection.request_schedules_raw, timeout=2.0)
-        return jsonify({'status': 'ok', 'data': data})
+        # Surowe bajty i ramka nie są serializowalne do JSON — zwracamy postać hex.
+        payload_hex = str(data.get('payload_hex') or '')
+        return jsonify({
+            'status': 'ok',
+            'data': {
+                'payload_hex': payload_hex,
+                'size': len(payload_hex) // 2,
+            },
+        })
     except TimeoutError as exc:
         return jsonify({'status': 'error', 'message': str(exc)}), 504
     except Exception as exc:

@@ -627,18 +627,24 @@ function updateScheduleParameterUI(scheduleType) {
 
     // Znajdź type_name dla wybranego numeru
     const typeInfo = (scheduleStore.knownTypes || []).find((t) => t.type === scheduleType);
-    const typeName = typeInfo?.type_name || null;
-    const paramLabel = typeName !== null ? scheduleParameterLabels[typeName] : undefined;
-    const supported = paramLabel !== null && paramLabel !== undefined;
+    const typeName = typeInfo?.type_name ?? null;
+    const mappedLabel = typeName !== null ? scheduleParameterLabels[typeName] : null;
+    // null = jawnie nie obsługuje parametru; undefined = nieznany typ (pole włączone)
+    const supported = mappedLabel !== null;
+    const effectiveLabel = mappedLabel ?? 'Parametr harmonogramu';
 
-    if (labelEl) labelEl.textContent = supported ? paramLabel : 'Parametr harmonogramu';
+    if (labelEl) labelEl.textContent = effectiveLabel;
     inputEl.disabled = !supported;
     inputEl.style.opacity = supported ? '' : '0.45';
+    if (!supported) {
+        inputEl.value = '0';
+    }
     if (rangeEl) {
         if (!supported) {
             rangeEl.textContent = 'Ten typ harmonogramu nie obsługuje parametru.';
+        } else {
+            rangeEl.textContent = '';  // applyScheduleToForm uzupełni zakres
         }
-        // Zakres aktualizuje applyScheduleToForm na podstawie danych z kotła
     }
 }
 
@@ -941,16 +947,23 @@ async function saveScheduleSemantic() {
 
     const switchEl = document.getElementById('schedule_switch');
     const parameterEl = document.getElementById('schedule_parameter');
-    const parameter = parseInt(parameterEl?.value || '', 10);
-    if (Number.isNaN(parameter)) {
-        showBoilerControlMsg('Parametr harmonogramu musi być liczbą całkowitą.', 'error');
-        return;
-    }
 
-    const rangeError = validateParameterRangeAgainstCurrentSchedule(parameter);
-    if (rangeError) {
-        showBoilerControlMsg(rangeError, 'error');
-        return;
+    let parameter;
+    if (parameterEl?.disabled) {
+        // Typ nie obsługuje parametru — wyślij bieżącą wartość z kotła lub 0
+        const current = scheduleStore.schedulesByType.get(scheduleType);
+        parameter = current?.parameter?.value ?? 0;
+    } else {
+        parameter = parseInt(parameterEl?.value || '', 10);
+        if (Number.isNaN(parameter)) {
+            showBoilerControlMsg('Parametr harmonogramu musi być liczbą całkowitą.', 'error');
+            return;
+        }
+        const rangeError = validateParameterRangeAgainstCurrentSchedule(parameter);
+        if (rangeError) {
+            showBoilerControlMsg(rangeError, 'error');
+            return;
+        }
     }
 
     const days = getScheduleDaysFromGrid();
