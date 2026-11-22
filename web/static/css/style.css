@@ -1503,3 +1503,8 @@ input[type="checkbox"] {
 @media (prefers-reduced-motion: reduce) {
     *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* Alarmy sterownika: trwający alarm wyróżniony */
+.parameters-table tr.is-ongoing td { color: var(--danger); font-weight: 600; }
+.pending-alarms { font-size: 0.8rem; font-weight: 600; margin-top: 2px; }
+.pending-alarms a { color: var(--danger); text-decoration: none; }

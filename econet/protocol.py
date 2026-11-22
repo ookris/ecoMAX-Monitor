@@ -51,6 +51,7 @@ FRAME_GET_SETTINGS_ANS = 0xB8
 FRAME_UID_ANS = 0xB9
 FRAME_SET_BOILER_CONTROL_ANS = 0xBB
 FRAME_SCHEDULES_ANS = 0xB6
+FRAME_ALARMS_ANS = 0xBD
 FRAME_SET_THERMOSTAT_PARAM_ANS = 0xDD
 FRAME_GET_THERMOSTAT_PARAMS_ANS = 0xDC
 FRAME_TIME = 0x89
@@ -249,6 +250,12 @@ class FrameBuilder:
     def request_uid(dest_addr=ADDR_ECOMAX):
         """Ramka 0x39 - pobierz UID i model sterownika."""
         body = bytes([FRAME_GET_UID])
+        return FrameBuilder.create_frame(dest_addr, body)
+
+    @staticmethod
+    def request_alerts(dest_addr=ADDR_ECOMAX, start=0, count=10):
+        """Ramka 0x3D - pobierz historie alarmow (odpowiada panel ramka 0xBD)."""
+        body = bytes([FRAME_GET_ALARMS, start & 0xFF, count & 0xFF])
         return FrameBuilder.create_frame(dest_addr, body)
 
     @staticmethod

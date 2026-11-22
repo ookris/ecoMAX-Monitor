@@ -11,6 +11,8 @@ parametrow blokowalby kolejne zapisy (wspolna blokada transakcji polaczenia).
 Zadania:
 - 'params': odczyt parametrow (0x31/0xB1), odswiezenie cache limitow w API
   i zapis do historii zmian parametrow zmienionych poza aplikacja (panel, ecoNET).
+- 'alarms': odczyt historii alarmow (0x3D/0xBD) do tabeli controller_alarms;
+  nowe alarmy (poza pierwszym importem) zglaszane jako alerty aplikacji.
 """
 
 from __future__ import annotations
@@ -20,13 +22,20 @@ import threading
 import time
 from typing import Any, Callable, Optional
 
-from econet import protocol
+from econet import alarms, protocol
 from econet.boiler_control import PARAMETERS
 from econet.ecomax_parameters import parameter_key
 
 logger = logging.getLogger(__name__)
 
 TASK_PARAMS = 'params'
+TASK_ALARMS = 'alarms'
+
+# Bezpiecznik stronicowania historii alarmow (10 alarmow na strone).
+_MAX_ALARM_PAGES = 30
+
+# Klucz konfiguracji: pierwszy import historii alarmow zostal wykonany.
+CONFIG_ALARMS_IMPORTED = 'controller_alarms_imported'
 
 # Typy ramek, ktorych zmiana wersji oznacza zmiane parametrow sterownika.
 # 0x38 = REQUEST_ECOMAX_PARAMETER_CHANGES (PyPlumIO odpytuje wtedy 0x31).
@@ -41,6 +50,7 @@ DEFAULT_DEBOUNCE_SEC = 10.0
 # Zadania okresowe: odstep w sekundach (awaryjnie, gdy wersje ramek nie sa dostepne).
 _PERIODIC_TASKS: dict[str, float] = {
     TASK_PARAMS: 15 * 60,
+    TASK_ALARMS: 15 * 60,
 }
 
 _CATALOG_KEYS = {param.index: param.key for param in PARAMETERS}
@@ -55,14 +65,17 @@ class ControllerSync:
         database: Any,
         *,
         on_parameters: Optional[Callable[[dict], None]] = None,
+        on_new_alarm: Optional[Callable[[dict], None]] = None,
         debounce_sec: float = DEFAULT_DEBOUNCE_SEC,
     ) -> None:
         self._connection = connection
         self._db = database
         self._on_parameters = on_parameters
+        self._on_new_alarm = on_new_alarm
         self._debounce_sec = debounce_sec
         self._due: dict[str, float] = {}        # zadania zlecone: zadanie -> termin
         self._periodic_next: dict[str, float] = {}  # zadania okresowe: zadanie -> termin
+        self._current_task: Optional[str] = None
         self._due_lock = threading.Lock()
         self._wakeup = threading.Event()
         self._running = False
@@ -88,6 +101,10 @@ class ControllerSync:
         self._thread.start()
         logger.info("ControllerSync uruchomiony")
 
+    @property
+    def running(self) -> bool:
+        return self._running
+
     def stop(self) -> None:
         self._running = False
         self._wakeup.set()
@@ -107,13 +124,19 @@ class ControllerSync:
         self._wakeup.set()
 
     def pending_tasks(self) -> dict[str, float]:
+        """Zadania oczekujace (zadanie -> termin) lacznie z aktualnie wykonywanym (termin 0)."""
         with self._due_lock:
-            return dict(self._due)
+            pending = dict(self._due)
+            if self._current_task:
+                pending[self._current_task] = 0.0
+            return pending
 
     def _on_frame_versions(self, changes: dict) -> None:
         # Wywolywane w watku odczytu z EW11A - tylko zlecamy prace.
         if any(frame_type in _PARAMS_FRAME_TYPES for frame_type in changes):
             self.request(TASK_PARAMS, delay=self._debounce_sec)
+        if protocol.FRAME_GET_ALARMS in changes:
+            self.request(TASK_ALARMS, delay=self._debounce_sec)
 
     # --------------------------------------------------------------- worker
 
@@ -143,12 +166,17 @@ class ControllerSync:
         for task in ready:
             if not getattr(self._connection, 'connected', False):
                 continue
+            with self._due_lock:
+                self._current_task = task
             try:
                 self._run_task(task)
             except TimeoutError as e:
                 logger.info("ControllerSync: zadanie %s - brak odpowiedzi sterownika (%s)", task, e)
             except Exception as e:
                 logger.error("ControllerSync: blad zadania %s: %s", task, e, exc_info=True)
+            finally:
+                with self._due_lock:
+                    self._current_task = None
         return ready
 
     def _worker(self) -> None:
@@ -164,6 +192,8 @@ class ControllerSync:
     def _run_task(self, task: str) -> None:
         if task == TASK_PARAMS:
             self.sync_parameters()
+        elif task == TASK_ALARMS:
+            self.sync_alarms()
 
     # ----------------------------------------------------------- parametry
 
@@ -211,3 +241,77 @@ class ControllerSync:
                 status='ok',
                 message='Zmiana wykryta w sterowniku (panel lub inne urządzenie)',
             )
+
+    # -------------------------------------------------------------- alarmy
+
+    def sync_alarms(self) -> dict[str, int]:
+        """Pobierz historie alarmow ze sterownika i zapisz zmiany w bazie.
+
+        Pierwszy import pobiera wszystkie strony i nie zglasza alertow; znacznik importu
+        jest zapisywany dopiero po pelnym przebiegu (przerwany import zostanie powtorzony).
+        Kolejne synchronizacje koncza stronicowanie na pierwszej stronie bez zmian
+        (alarmy sa uporzadkowane od najnowszego), chyba ze w bazie sa starsze
+        trwajace alarmy - wtedy czytamy dalej, aby uzupelnic ich koniec.
+        """
+        if not hasattr(self._connection, 'request_alerts'):
+            return {'new': 0, 'updated': 0, 'unchanged': 0, 'invalid': 0, 'total': 0}
+        future_limit = time.time() + 86400
+        initial_import = self._db.get_config(CONFIG_ALARMS_IMPORTED, '0') != '1'
+        oldest_ongoing = self._db.oldest_ongoing_controller_alarm_ts()
+        stats = {'new': 0, 'updated': 0, 'unchanged': 0, 'invalid': 0, 'total': 0}
+        new_alarms: list[dict] = []
+
+        start = 0
+        for _ in range(_MAX_ALARM_PAGES):
+            page = self._connection.request_alerts(start=start, count=alarms.ALERTS_PAGE_SIZE)
+            stats['total'] = page['total']
+            page_changed = False
+            page_oldest = None
+            for alarm in page['alerts']:
+                start_dt, end_dt = alarm['start'], alarm['end']
+                if (
+                    alarm.get('invalid')
+                    or start_dt.timestamp() > future_limit
+                    or (end_dt is not None and end_dt.timestamp() > future_limit)
+                ):
+                    # Uszkodzony znacznik czasu w sterowniku (np. po resecie zegara).
+                    stats['invalid'] += 1
+                    continue
+                page_oldest = start_dt.timestamp() if page_oldest is None else min(page_oldest, start_dt.timestamp())
+                result = self._db.upsert_controller_alarm(
+                    code=alarm['code'],
+                    start_text=start_dt.isoformat(sep=' '),
+                    start_ts=start_dt.timestamp(),
+                    end_text=end_dt.isoformat(sep=' ') if end_dt else None,
+                    end_ts=end_dt.timestamp() if end_dt else None,
+                )
+                stats[result] += 1
+                if result != 'unchanged':
+                    page_changed = True
+                if result == 'new':
+                    new_alarms.append(alarm)
+
+            start += alarms.ALERTS_PAGE_SIZE
+            if start >= page['total'] or not page['alerts']:
+                break
+            if not initial_import and not page_changed:
+                needs_ongoing_update = (
+                    oldest_ongoing is not None and page_oldest is not None and page_oldest > oldest_ongoing
+                )
+                if not needs_ongoing_update:
+                    break
+
+        if initial_import:
+            self._db.set_config(CONFIG_ALARMS_IMPORTED, '1')
+
+        if stats['new'] or stats['updated']:
+            logger.info("Alarmy sterownika: %d nowych, %d zaktualizowanych (lacznie w sterowniku: %d)",
+                        stats['new'], stats['updated'], stats['total'])
+
+        if not initial_import and self._on_new_alarm:
+            for alarm in sorted(new_alarms, key=lambda a: a['start']):
+                try:
+                    self._on_new_alarm(alarm)
+                except Exception as e:
+                    logger.error("Blad zglaszania alarmu sterownika: %s", e, exc_info=True)
+        return stats

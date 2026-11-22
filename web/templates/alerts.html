@@ -31,6 +31,31 @@
         </div>
         <div id="alerts-list" class="alerts-list alerts-list-visible"></div>
     </section>
+
+    <section class="settings-section" id="controller-alarms-section">
+        <h2>Alarmy sterownika</h2>
+        <p class="settings-hint">Historia alarmów zapisana w sterowniku ecoMAX (odczyt przez EW11A), także z okresów, gdy aplikacja nie działała. Synchronizacja odbywa się automatycznie po nowym alarmie i co 15 minut.</p>
+        <div class="section-actions section-actions-top">
+            <span id="controller-alarms-summary" class="settings-hint"></span>
+            <button class="btn-secondary" onclick="refreshControllerAlarms()"><iconify-icon icon="mdi:download"></iconify-icon> Odczytaj ze sterownika</button>
+        </div>
+        <div class="parameters-table-wrap">
+            <table class="parameters-table">
+                <thead>
+                    <tr>
+                        <th>Początek</th>
+                        <th>Koniec</th>
+                        <th>Czas trwania</th>
+                        <th>Kod</th>
+                        <th>Alarm</th>
+                    </tr>
+                </thead>
+                <tbody id="controller-alarms-body">
+                    <tr><td colspan="5" class="parameters-empty">Brak danych.</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
 {% endblock %}
 
 {% block scripts %}

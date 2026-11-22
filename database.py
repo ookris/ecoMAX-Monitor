@@ -187,6 +187,29 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_boiler_setting_changes_timestamp
             ON boiler_setting_changes(timestamp DESC)
         """)
+        # Historia alarmow odczytana ze sterownika (0x3D/0xBD). Czas sterownika
+        # (lokalny) zapisany jako tekst + znacznik Unix wg strefy aplikacji.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS controller_alarms (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                code INTEGER NOT NULL,
+                start_text TEXT NOT NULL,
+                end_text TEXT,
+                start_ts REAL NOT NULL,
+                end_ts REAL,
+                first_seen REAL NOT NULL
+            )
+        """)
+        # Tozsamosc alarmu: kod + poczatek + koniec. Sterownik potrafi miec dwa alarmy
+        # o tym samym kodzie i poczatku (np. zaniki zasilania po resecie zegara).
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_controller_alarms_identity
+            ON controller_alarms(code, start_text)
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_controller_alarms_start
+            ON controller_alarms(start_ts DESC)
+        """)
         self._conn.commit()
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
@@ -530,10 +553,13 @@ class Database:
                 alerts_deleted = self._conn.execute(
                     "DELETE FROM alerts"
                 ).rowcount
+                self._conn.execute("DELETE FROM controller_alarms")
+                # Po wyczyszczeniu historia alarmow zostanie zaimportowana ponownie bez alertow.
+                self._conn.execute("DELETE FROM config WHERE key = 'controller_alarms_imported'")
 
                 # Reset licznikow AUTOINCREMENT dla tabel runtime.
                 self._conn.execute(
-                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts')"
+                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts', 'controller_alarms')"
                 )
                 self._conn.commit()
 
@@ -564,9 +590,10 @@ class Database:
                 config_deleted = self._conn.execute(
                     "DELETE FROM config"
                 ).rowcount
+                self._conn.execute("DELETE FROM controller_alarms")
 
                 self._conn.execute(
-                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts')"
+                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts', 'controller_alarms')"
                 )
                 self._conn.commit()
 
@@ -660,6 +687,100 @@ class Database:
             except sqlite3.Error as e:
                 logger.error("Blad odczytu historii zmian kotla: %s", e)
                 return False
+
+    def upsert_controller_alarm(
+        self,
+        *,
+        code: int,
+        start_text: str,
+        start_ts: float,
+        end_text: Optional[str],
+        end_ts: Optional[float],
+    ) -> str:
+        """Zapisz alarm sterownika. Zwraca 'new', 'updated' (trwajacy alarm sie zakonczyl)
+        lub 'unchanged'. Tozsamosc alarmu: kod + poczatek + koniec.
+        """
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT id, end_text FROM controller_alarms WHERE code = ? AND start_text = ?",
+                    (code, start_text),
+                ).fetchall()
+                if any(row['end_text'] == end_text for row in rows):
+                    return 'unchanged'
+                ongoing = next((row for row in rows if row['end_text'] is None), None)
+                if end_text is not None and ongoing is not None:
+                    self._conn.execute(
+                        "UPDATE controller_alarms SET end_text = ?, end_ts = ? WHERE id = ?",
+                        (end_text, end_ts, ongoing['id']),
+                    )
+                    self._conn.commit()
+                    return 'updated'
+                self._conn.execute(
+                    """
+                    INSERT INTO controller_alarms(code, start_text, end_text, start_ts, end_ts, first_seen)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (code, start_text, end_text, start_ts, end_ts, time.time()),
+                )
+                self._conn.commit()
+                return 'new'
+            except sqlite3.Error as e:
+                logger.error("Blad zapisu alarmu sterownika: %s", e)
+                return 'unchanged'
+
+    def oldest_ongoing_controller_alarm_ts(self) -> Optional[float]:
+        """Poczatek najstarszego alarmu bez konca (do decyzji o dalszym stronicowaniu)."""
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT MIN(start_ts) AS ts FROM controller_alarms WHERE end_ts IS NULL"
+                ).fetchone()
+                return row['ts'] if row and row['ts'] is not None else None
+            except sqlite3.Error as e:
+                logger.error("Blad odczytu alarmow sterownika: %s", e)
+                return None
+
+    def count_controller_alarms(self) -> int:
+        with self._lock:
+            try:
+                row = self._conn.execute("SELECT COUNT(*) AS total FROM controller_alarms").fetchone()
+                return int(row['total'] or 0)
+            except sqlite3.Error as e:
+                logger.error("Blad zliczania alarmow sterownika: %s", e)
+                return 0
+
+    def get_controller_alarms(
+        self,
+        limit: Optional[int] = 200,
+        since: Optional[float] = None,
+        until: Optional[float] = None,
+        code: Optional[int] = None,
+    ) -> list[dict[str, Any]]:
+        """Alarmy sterownika (najnowsze pierwsze), opcjonalnie w zakresie czasu / dla kodu."""
+        clauses, params = [], []
+        if since is not None:
+            clauses.append("start_ts >= ?")
+            params.append(since)
+        if until is not None:
+            clauses.append("start_ts < ?")
+            params.append(until)
+        if code is not None:
+            clauses.append("code = ?")
+            params.append(int(code))
+        query = "SELECT * FROM controller_alarms"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY start_ts DESC, id DESC"
+        if limit is not None:
+            query += " LIMIT ?"
+            params.append(min(max(int(limit), 1), 100000))
+        with self._lock:
+            try:
+                return [dict(r) for r in self._conn.execute(query, params).fetchall()]
+            except sqlite3.Error as e:
+                logger.error("Blad odczytu alarmow sterownika: %s", e)
+                return []
 
     def get_boiler_setting_changes(self, limit: int = 100) -> list[dict[str, Any]]:
         """Pobierz historię zmian ustawień kotła (najnowsze pierwsze)."""

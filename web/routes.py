@@ -31,6 +31,8 @@ from econet.boiler_control import (
     format_parameter_value,
 )
 from derived_data import apply_config_overrides, is_fuel_level_not_set, parse_nominal_power
+from econet.alarms import alarm_name
+from controller_sync import TASK_ALARMS
 from sensors import DASHBOARD_TILE_DEFINITIONS, DASHBOARD_TILE_KEYS
 
 bp = Blueprint('main', __name__)
@@ -408,6 +410,7 @@ def _mark_legacy_migration_failed(location_name: str, reason: str):
 _routes_lock = threading.Lock()
 _connection = None
 _database = None
+_controller_sync = None
 _boiler_limits_cache_lock = threading.Lock()
 _boiler_limits_cache = {
     'cached_at': 0.0,
@@ -1147,12 +1150,13 @@ def _read_system_ntp_status() -> dict:
     return status
 
 
-def init_routes(connection, database):
-    """Ustaw referencje do polaczenia i bazy."""
-    global _connection, _database
+def init_routes(connection, database, controller_sync=None):
+    """Ustaw referencje do polaczenia, bazy i synchronizacji ze sterownikiem."""
+    global _connection, _database, _controller_sync
     with _routes_lock:
         _connection = connection
         _database = database
+        _controller_sync = controller_sync
 
     # Zastosuj zapisana strefe czasowa na poziomie procesu,
     # aby czas wysylany przez WebSocket byl zgodny z konfiguracja aplikacji.
@@ -2165,6 +2169,61 @@ def get_alerts():
             'limited': len(data) < filtered_total,
         })
     return jsonify({'status': 'error', 'data': [], 'count': 0})
+
+
+def _format_controller_alarm(row: dict) -> dict:
+    start_ts = row.get('start_ts')
+    end_ts = row.get('end_ts')
+    ongoing = end_ts is None
+    duration_ref = time.time() if ongoing else end_ts
+    duration_min = None
+    if isinstance(start_ts, (int, float)) and isinstance(duration_ref, (int, float)):
+        duration_min = max(0, round((duration_ref - start_ts) / 60.0, 1))
+    return {
+        'id': row.get('id'),
+        'code': row.get('code'),
+        'name': alarm_name(row.get('code')),
+        'start': row.get('start_text'),
+        'end': row.get('end_text'),
+        'start_ts': start_ts,
+        'end_ts': end_ts,
+        'ongoing': ongoing,
+        'duration_min': duration_min,
+    }
+
+
+@bp.route('/api/controller-alarms', methods=['GET'])
+def get_controller_alarms():
+    """Historia alarmow odczytana ze sterownika (najnowsze pierwsze)."""
+    if not _database:
+        return jsonify({'status': 'error', 'message': 'Brak bazy danych'}), 500
+    limit = request.args.get('limit', 200, type=int) or 200
+    rows = _database.get_controller_alarms(limit=min(max(limit, 1), 10000))
+    pending = None
+    if _controller_sync is not None:
+        pending = TASK_ALARMS in _controller_sync.pending_tasks()
+    return jsonify({
+        'status': 'ok',
+        'count': len(rows),
+        'total': _database.count_controller_alarms(),
+        'refresh_pending': pending,
+        'data': [_format_controller_alarm(r) for r in rows],
+    })
+
+
+@bp.route('/api/controller-alarms/refresh', methods=['POST'])
+def refresh_controller_alarms():
+    """Zlec odczyt historii alarmow ze sterownika (wykonywany w tle)."""
+    if not _is_boiler_control_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Brak uprawnień'}), 403
+    if (
+        _controller_sync is None
+        or not _controller_sync.running
+        or not (_connection and getattr(_connection, 'connected', False))
+    ):
+        return jsonify({'status': 'error', 'message': 'Brak połączenia ze sterownikiem'}), 503
+    _controller_sync.request(TASK_ALARMS)
+    return jsonify({'status': 'ok', 'message': 'Zlecono odczyt alarmów ze sterownika'})
 
 
 @bp.route('/api/alerts/read', methods=['POST'])

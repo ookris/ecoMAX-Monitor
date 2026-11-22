@@ -148,7 +148,116 @@ async function markAllAlertsRead() {
     }
 }
 
+// ---- Alarmy sterownika (historia odczytana z ecoMAX) ----
+
+function formatDuration(minutes) {
+    const value = Number(minutes);
+    if (!Number.isFinite(value)) return '--';
+    const total = Math.round(value);
+    if (total < 60) return `${total} min`;
+    const hours = Math.floor(total / 60);
+    const rest = total % 60;
+    if (hours < 24) return `${hours} h ${rest} min`;
+    return `${Math.floor(hours / 24)} d ${hours % 24} h`;
+}
+
+function controllerAlarmsMessage(body, text) {
+    body.textContent = '';
+    const tr = controllerAlarmsRow([text]);
+    tr.firstChild.colSpan = 5;
+    tr.firstChild.className = 'parameters-empty';
+    body.appendChild(tr);
+}
+
+function controllerAlarmsRow(cells, className = '') {
+    const tr = document.createElement('tr');
+    if (className) tr.className = className;
+    for (const cell of cells) {
+        const td = document.createElement('td');
+        td.textContent = cell;
+        tr.appendChild(td);
+    }
+    return tr;
+}
+
+async function loadControllerAlarms() {
+    const body = document.getElementById('controller-alarms-body');
+    const summary = document.getElementById('controller-alarms-summary');
+    if (!body) return;
+    try {
+        const resp = await fetch('/api/controller-alarms?limit=500');
+        const json = await resp.json();
+        body.textContent = '';
+        if (json.status !== 'ok' || !Array.isArray(json.data)) {
+            if (summary) summary.textContent = '';
+            controllerAlarmsMessage(body, 'Nie udało się pobrać alarmów sterownika.');
+            return null;
+        }
+        if (summary) {
+            const ongoing = json.data.filter((a) => a.ongoing).length;
+            summary.textContent = `Zapisanych alarmów: ${json.total}` + (ongoing ? ` · trwających: ${ongoing}` : '');
+        }
+        if (json.data.length === 0) {
+            controllerAlarmsMessage(body, 'Brak alarmów – historia zostanie odczytana po połączeniu ze sterownikiem.');
+            return json;
+        }
+        for (const alarm of json.data) {
+            body.appendChild(controllerAlarmsRow([
+                alarm.start || '--',
+                alarm.ongoing ? 'trwa' : (alarm.end || '--'),
+                formatDuration(alarm.duration_min),
+                String(alarm.code ?? '--'),
+                alarm.name || '--',
+            ], alarm.ongoing ? 'is-ongoing' : ''));
+        }
+        return json;
+    } catch (e) {
+        if (summary) summary.textContent = '';
+        controllerAlarmsMessage(body, 'Błąd: ' + e.message);
+        return null;
+    }
+}
+
+// Po zleceniu odczytu odświeżaj tabelę, dopóki zadanie jest w toku (maks. ~1 min).
+async function pollControllerAlarms(attempt = 0) {
+    const json = await loadControllerAlarms();
+    if (json && json.refresh_pending && attempt < 20) {
+        setTimeout(() => pollControllerAlarms(attempt + 1), 3000);
+    }
+}
+
+function controllerRequestHeaders() {
+    const headers = { 'Content-Type': 'application/json', 'X-Requested-With': 'ecoMAX-Monitor' };
+    try {
+        const token = window.localStorage?.getItem('boilerControlAccessToken');
+        if (token) headers['X-Boiler-Control-Token'] = String(token).trim();
+    } catch (e) {
+        // Brak localStorage - wysyłamy bez tokenu.
+    }
+    return headers;
+}
+
+async function refreshControllerAlarms() {
+    try {
+        const resp = await fetch('/api/controller-alarms/refresh', {
+            method: 'POST',
+            headers: controllerRequestHeaders(),
+            body: '{}',
+        });
+        const json = await resp.json();
+        if (json.status !== 'ok') {
+            showMsg(json.message || 'Nie udało się zlecić odczytu alarmów.', 'error');
+            return;
+        }
+        showMsg('Zlecono odczyt alarmów ze sterownika.', 'ok');
+        setTimeout(() => pollControllerAlarms(0), 1500);
+    } catch (e) {
+        showMsg('Błąd połączenia: ' + e.message, 'error');
+    }
+}
+
 document.addEventListener('DOMContentLoaded', () => {
+    loadControllerAlarms();
     const unreadOnlyEl = document.getElementById('alerts-unread-only');
     const typeEl = document.getElementById('alerts-type-filter');
 

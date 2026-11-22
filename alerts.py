@@ -19,6 +19,7 @@ ALERT_LABELS = {
     'temp_co_low':   'Niska temp. CO',
     'fuel_low':      'Niski poziom paliwa',
     'no_connection': 'Brak polaczenia z EW11A',
+    'controller_alarm': 'Alarm sterownika',
 }
 
 
@@ -91,6 +92,10 @@ class AlertEngine:
                 self._fire(alert_type, message)
             elif not condition and was_active:
                 self._active[alert_type] = False
+
+    def fire(self, alert_type: str, message: str) -> None:
+        """Zglos alert z zewnatrz silnika (np. nowy alarm odczytany ze sterownika)."""
+        self._fire(alert_type, message)
 
     def _fire(self, alert_type: str, message: str) -> None:
         alert = {

@@ -11,7 +11,7 @@ import logging
 import datetime
 import queue
 
-from econet import protocol, decoder
+from econet import alarms, protocol, decoder
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +64,7 @@ class EW11AConnection:
             protocol.FRAME_GET_PARAMS_ANS: queue.Queue(maxsize=20),
             protocol.FRAME_SCHEDULES_ANS: queue.Queue(maxsize=20),
             protocol.FRAME_UID_ANS: queue.Queue(maxsize=5),
+            protocol.FRAME_ALARMS_ANS: queue.Queue(maxsize=20),
         }
         self._device_info: dict | None = None
 
@@ -533,6 +534,36 @@ class EW11AConnection:
         if info.get('model'):  # nie cachuj niepełnych wyników
             self._device_info = info
         return info
+
+    def request_alerts(self, start=0, count=alarms.ALERTS_PAGE_SIZE, timeout=3.0) -> dict:
+        """Pobierz strone historii alarmow (0x3D -> 0xBD).
+
+        Odpowiedz jest dopasowywana po polu `start`, bo na magistrali moga pojawic sie
+        ramki 0xBD bedace odpowiedzia na zapytania innych urzadzen.
+        """
+        start = int(start)
+        count = int(count)
+        if not (0 <= start <= 255 and 1 <= count <= 255):
+            raise ValueError('start/count poza zakresem 0..255')
+
+        with self._transaction_lock:
+            self._drain_response_queue(protocol.FRAME_ALARMS_ANS)
+            self.send_frame(protocol.FrameBuilder.request_alerts(
+                dest_addr=protocol.ADDR_ECOMAX, start=start, count=count))
+
+            response_queue = self._response_queues[protocol.FRAME_ALARMS_ANS]
+            deadline = time.time() + max(0.5, float(timeout))
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError('Brak odpowiedzi na zapytanie alarmow (0xBD)')
+                try:
+                    frame = response_queue.get(timeout=remaining)
+                except queue.Empty as exc:
+                    raise TimeoutError('Brak odpowiedzi na zapytanie alarmow (0xBD)') from exc
+                parsed = alarms.decode_alerts_payload(bytes(frame.get('payload') or b''))
+                if parsed is not None and parsed['start'] == start:
+                    return parsed
 
     def get_device_info_cached(self) -> dict | None:
         """Zwróć ostatnio odczytany device info (lub None jeśli nie pobrano)."""

@@ -321,6 +321,14 @@ function updateDashboard(data) {
     if (modeTimeEl) modeTimeEl.textContent = controllerDateTime.time;
     if (modeDateEl) modeDateEl.textContent = controllerDateTime.date;
 
+    const pendingEl = document.getElementById('pending-alarms');
+    const pendingNames = Array.isArray(data.pending_alerts_names) ? data.pending_alerts_names : [];
+    if (pendingEl) {
+        pendingEl.style.display = pendingNames.length ? '' : 'none';
+        const link = pendingEl.querySelector('a');
+        if (link) link.textContent = pendingNames.length ? `Aktywny alarm: ${pendingNames.join(', ')}` : '';
+    }
+
     modeCard.classList.remove('alarm', 'off');
     if (data.mode === 8) modeCard.classList.add('alarm');
     else if (data.mode === 0) modeCard.classList.add('off');

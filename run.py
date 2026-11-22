@@ -255,11 +255,24 @@ def main():
         db_save_interval,
     )
 
+    def on_new_controller_alarm(alarm):
+        end = alarm.get('end')
+        period = f"do {end:%Y-%m-%d %H:%M}" if end else "trwa"
+        alert_engine.fire(
+            'controller_alarm',
+            f"{alarm['name']} (kod {alarm['code']}) od {alarm['start']:%Y-%m-%d %H:%M}, {period}",
+        )
+
+    controller_sync = ControllerSync(
+        connection,
+        db,
+        on_parameters=update_boiler_limits_cache,
+        on_new_alarm=on_new_controller_alarm,
+    )
+
     # Flask app
     app = create_app()
-    init_routes(connection, db)
-
-    controller_sync = ControllerSync(connection, db, on_parameters=update_boiler_limits_cache)
+    init_routes(connection, db, controller_sync)
 
     # Start polaczenia/symulatora
     controller_sync.start()

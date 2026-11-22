@@ -14,6 +14,8 @@ import logging
 import math
 import time
 
+from econet.alarms import alarm_name
+
 logger = logging.getLogger(__name__)
 
 # Zakresy fizyczne pol numerycznych (min, max) - wartosci spoza zakresu
@@ -466,6 +468,7 @@ class BoilerData:
             'water_heater_status': self.water_heater_status,
             'pending_alerts': list(self.pending_alerts),
             'pending_alerts_count': len(self.pending_alerts),
+            'pending_alerts_names': [alarm_name(code) for code in self.pending_alerts],
             'transmission': self.transmission,
             'thermostat_contact': self.thermostat_contact,
             'lambda_state': self.lambda_state,

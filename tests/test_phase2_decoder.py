@@ -145,7 +145,7 @@ def test_controller_sync_debounces_version_changes(tmp_path):
 
     sync._on_frame_versions({0x38: (21, 22)})
     first_due = sync.pending_tasks()[TASK_PARAMS]
-    sync._on_frame_versions({0x3D: (1, 2)})      # nie dotyczy parametrow
+    sync._on_frame_versions({0x54: (1, 2)})      # nie wyzwala zadnej synchronizacji
     time.sleep(0.01)
     sync._on_frame_versions({0x38: (22, 23)})    # kolejna zmiana przesuwa termin
     assert sync.pending_tasks()[TASK_PARAMS] > first_due
