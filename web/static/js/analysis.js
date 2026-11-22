@@ -36,12 +36,12 @@ let selectedAnalysisHours = 24;
 
 const MODE_NAME_FALLBACKS = Object.freeze({
     0: 'Wyłączony',
-    1: 'Zatrzymany',
+    1: 'Stabilizacja',
     2: 'Rozpalanie',
     3: 'Praca',
     4: 'Nadzór',
     5: 'Postój',
-    6: 'Czyszczenie',
+    6: 'Czuwanie',
     7: 'Wygaszanie',
     8: 'Alarm',
     9: 'Ręczny',

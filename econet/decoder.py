@@ -48,18 +48,28 @@ _FIELD_BOUNDS: dict[str, tuple[float, float]] = {
 # Publiczna stała do użycia w innych modułach – górna granica strumienia paliwa.
 FUEL_STREAM_MAX: float = _FIELD_BOUNDS['fuel_stream'][1]
 
+# Czujniki pomocnicze (indeksy 13-16): wartosc spoza zakresu traktujemy jako
+# brak czujnika (None) zamiast odrzucac cala ramke.
+_AUX_TEMP_BOUNDS: dict[str, tuple[float, float]] = {
+    'temp_hydraulic_coupler': (-30, 150),
+    'temp_exchanger':         (-30, 150),
+    'temp_air_in':            (-60, 100),
+    'temp_air_out':           (-60, 100),
+}
+
 # Zbiór kluczy pól temperaturowych ze słownika _FIELD_BOUNDS (bez zadanych).
 _TEMP_FIELDS: frozenset[str] = frozenset(k for k in _FIELD_BOUNDS if k.startswith('temp_'))
 
-# Tryby pracy kotla (z ecomax.py Mode class, linia 311-323)
+# Tryby pracy kotla (zgodne z PyPlumIO DeviceState i tlumaczeniem PL
+# integracji homeassistant-plum-ecomax).
 MODE_NAMES = {
     0: "Wyłączony",
-    1: "Zatrzymany",
+    1: "Stabilizacja",
     2: "Rozpalanie",
     3: "Praca",
     4: "Nadzór",
     5: "Postój",
-    6: "Czyszczenie",
+    6: "Czuwanie",
     7: "Wygaszanie",
     8: "Alarm",
     9: "Ręczny",
@@ -82,7 +92,15 @@ TEMP_NAMES = {
     10: ('temp_lower_solar', 'Solar dolny'),
     11: ('temp_fireplace', 'Kominek'),
     12: ('total_gain', 'Zysk calkowity'),
+    13: ('temp_hydraulic_coupler', 'Sprzeglo hydrauliczne'),
+    14: ('temp_exchanger', 'Wymiennik'),
+    15: ('temp_air_in', 'Powietrze wlot'),
+    16: ('temp_air_out', 'Powietrze wylot'),
 }
+
+# Poziom paliwa: niektore sterowniki raportuja wartosc przesunieta o 101
+# (PyPlumIO, issue #19 - ecoMAX 860P6-O).
+FUEL_LEVEL_OFFSET = 101
 
 # Flagi wyjsc (z ecomax.py linia 1016-1021)
 OUTPUT_FLAGS = {
@@ -122,6 +140,13 @@ def _parse_uint8(data):
     return val
 
 
+def _decode_fuel_level(raw):
+    """Poziom paliwa: 0xFF = brak, >= 101 = wartosc przesunieta o FUEL_LEVEL_OFFSET."""
+    if raw == 0xFF:
+        return None
+    return raw - FUEL_LEVEL_OFFSET if raw >= FUEL_LEVEL_OFFSET else raw
+
+
 def _parse_uint16_le(data):
     """Parsuj uint16 LE."""
     if len(data) < 2:
@@ -155,39 +180,67 @@ def _normalize_legacy_packet(packet):
     return packet
 
 
+def _looks_like_sensor_block(payload, idx):
+    """Czy od pozycji idx uklad [mode][outputs:4][flags:4][num_temps][temps] jest wiarygodny."""
+    if idx < 0 or idx >= len(payload) or payload[idx] not in MODE_NAMES:
+        return False
+
+    temps_pos = idx + 9
+    if temps_pos >= len(payload):
+        return False
+
+    num_temps = payload[temps_pos]
+    if num_temps == 0 or num_temps > len(TEMP_NAMES):
+        return False
+
+    temps_start = idx + 10
+    temps_end = temps_start + (num_temps * 5)
+    if temps_end > len(payload):
+        return False
+
+    return all(payload[pos] in TEMP_NAMES for pos in range(temps_start, temps_end, 5))
+
+
+def parse_frame_versions(payload, offset=0):
+    """Parsuj tabele wersji ramek: [count][frame_type:1, version:uint16 LE] x count.
+
+    Zwraca (dict frame_type -> version, offset_po_tabeli) albo (None, offset),
+    gdy tabela nie miesci sie w payloadzie.
+    """
+    if offset >= len(payload):
+        return None, offset
+    count = payload[offset]
+    end = offset + 1 + count * 3
+    if end > len(payload):
+        return None, offset
+    versions = {}
+    for pos in range(offset + 1, end, 3):
+        versions[payload[pos]] = payload[pos + 1] | (payload[pos + 2] << 8)
+    return versions, end
+
+
 def _find_econet_data_offset(payload):
     """Znajdz poczatek wlasciwych danych w ramce 0x35.
 
-    W strumieniu z EW11A ramka 0x35 moze miec prefiks przed blokiem danych.
-    Szukamy miejsca, od ktorego uklad [mode][outputs][flags][num_temps] wyglada wiarygodnie.
+    Ramka 0x35 zaczyna sie od tabeli wersji ramek (jak w PyPlumIO
+    SensorDataMessage = FrameVersionsStructure + SensorDataStructure).
+    Gdy tabela nie prowadzi do wiarygodnego bloku danych, szukamy heurystycznie
+    miejsca, od ktorego uklad [mode][outputs][flags][num_temps] wyglada wiarygodnie.
     """
+    versions, idx = parse_frame_versions(payload)
+    # Tabela jest wiarygodna, gdy ma wpisy i wszystkie klucze to typy ramek zapytan
+    # (< 0x80). Pusta tabela (count=0) jest niejednoznaczna z ramka bez prefiksu
+    # i trybem 0, wiec rozstrzyga ja heurystyka ponizej.
+    if (
+        versions
+        and all(frame_type < 0x80 for frame_type in versions)
+        and _looks_like_sensor_block(payload, idx)
+    ):
+        return idx
+
     max_prefix = min(32, max(0, len(payload) - 10))
-
     for idx in range(max_prefix + 1):
-        mode = payload[idx]
-        if mode not in MODE_NAMES:
-            continue
-
-        temps_pos = idx + 9
-        if temps_pos >= len(payload):
-            continue
-
-        num_temps = payload[temps_pos]
-        if num_temps == 0 or num_temps > len(TEMP_NAMES):
-            continue
-
-        temps_start = idx + 10
-        temps_end = temps_start + (num_temps * 5)
-        if temps_end > len(payload):
-            continue
-
-        valid_entries = 0
-        for pos in range(temps_start, temps_end, 5):
-            temp_index = payload[pos]
-            if temp_index in TEMP_NAMES:
-                valid_entries += 1
-
-        if valid_entries == num_temps:
+        if _looks_like_sensor_block(payload, idx):
             return idx
 
     return None
@@ -215,6 +268,10 @@ class BoilerData:
         self.temp_lower_solar = None
         self.temp_fireplace = None
         self.total_gain = None
+        self.temp_hydraulic_coupler = None
+        self.temp_exchanger = None
+        self.temp_air_in = None
+        self.temp_air_out = None
 
         # Temperatury zadane
         self.temp_co_set = None
@@ -226,6 +283,9 @@ class BoilerData:
         self.boiler_power_kw = None
         self.fuel_level = None
         self.fuel_stream = None  # kg/h
+        # Ustawiane przez derived_data.apply_config_overrides
+        self.fuel_level_not_set = False
+        self.boiler_power_source = None  # 'controller' | 'calculated' | None
 
         # Pompy
         self.pump_co = False
@@ -326,6 +386,10 @@ class BoilerData:
             'temp_lower_solar': self.temp_lower_solar,
             'temp_fireplace': self.temp_fireplace,
             'total_gain': self.total_gain,
+            'temp_hydraulic_coupler': self.temp_hydraulic_coupler,
+            'temp_exchanger': self.temp_exchanger,
+            'temp_air_in': self.temp_air_in,
+            'temp_air_out': self.temp_air_out,
             'temp_co_set': self.temp_co_set,
             'temp_cwu_set': self.temp_cwu_set,
             'fan_power': self.fan_power,
@@ -333,6 +397,8 @@ class BoilerData:
             'boiler_power_kw': self.boiler_power_kw,
             'fuel_level': self.fuel_level,
             'fuel_stream': self.fuel_stream,
+            'fuel_level_not_set': self.fuel_level_not_set,
+            'boiler_power_source': self.boiler_power_source,
             'pump_co': self.pump_co,
             'pump_cwu': self.pump_cwu,
             'pump_circulation': self.pump_circulation,
@@ -621,6 +687,9 @@ def decode_econet_data_frame(payload):
 
             if temp_index in TEMP_NAMES and temp_value is not None:
                 attr_name = TEMP_NAMES[temp_index][0]
+                aux_bounds = _AUX_TEMP_BOUNDS.get(attr_name)
+                if aux_bounds and not (aux_bounds[0] <= temp_value <= aux_bounds[1]):
+                    continue
                 if hasattr(data, attr_name):
                     setattr(data, attr_name, temp_value)
 
@@ -642,7 +711,7 @@ def decode_econet_data_frame(payload):
 
         # Fuel level, transmission, fan power, boiler power, power kW, fuel stream, thermostat
         if idx + 16 <= len(payload):
-            data.fuel_level = _parse_uint8(payload[idx:idx + 1])
+            data.fuel_level = _decode_fuel_level(payload[idx])
             # transmission = payload[idx + 1]
             data.fan_power = _parse_float32(payload[idx + 2:idx + 6])
             data.boiler_power = _parse_uint8(payload[idx + 6:idx + 7])

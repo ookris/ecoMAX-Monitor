@@ -246,6 +246,39 @@ function buildSelectOptions(param, minValue, maxValue) {
     return options;
 }
 
+// Wartość wyświetlana = (surowa - display_offset) * scale; sterownik operuje na wartościach surowych.
+function paramScale(param) {
+    const scale = Number(param.scale);
+    return Number.isFinite(scale) && scale > 0 ? scale : 1;
+}
+
+function paramOffset(param) {
+    const offset = Number(param.display_offset);
+    return Number.isFinite(offset) ? offset : 0;
+}
+
+function paramDecimals(param) {
+    const scale = paramScale(param);
+    if (scale >= 1) return 0;
+    return Math.min(3, Math.max(0, Math.ceil(-Math.log10(scale) - 1e-9)));
+}
+
+function rawToDisplay(param, raw) {
+    const value = (Number(raw) - paramOffset(param)) * paramScale(param);
+    return Number(value.toFixed(paramDecimals(param)));
+}
+
+function displayToRaw(param, display) {
+    return Math.round(Number(display) / paramScale(param)) + paramOffset(param);
+}
+
+function formatDisplayNumber(param, raw) {
+    return rawToDisplay(param, raw).toLocaleString('pl-PL', {
+        minimumFractionDigits: paramDecimals(param),
+        maximumFractionDigits: paramDecimals(param),
+    });
+}
+
 function valueToText(param, value) {
     if (value === null || value === undefined) return '--';
     const intValue = parseInt(String(value), 10);
@@ -256,8 +289,9 @@ function valueToText(param, value) {
         if (mapped) return mapped;
     }
 
-    if (param.unit) return `${intValue} ${param.unit}`;
-    return String(intValue);
+    const text = formatDisplayNumber(param, intValue);
+    if (param.unit) return `${text} ${param.unit}`;
+    return text;
 }
 
 function renderParameterCard(param) {
@@ -320,11 +354,11 @@ function renderParameterCard(param) {
         inputEl = document.createElement('input');
         inputEl.id = `param-${param.key}`;
         inputEl.type = 'number';
-        inputEl.min = String(param.min_value);
-        inputEl.max = String(param.max_value);
-        inputEl.step = String(param.step || 1);
+        inputEl.min = String(rawToDisplay(param, param.min_value));
+        inputEl.max = String(rawToDisplay(param, param.max_value));
+        inputEl.step = String(Number(((param.step || 1) * paramScale(param)).toFixed(paramDecimals(param))));
         if (param.current_value !== null && param.current_value !== undefined) {
-            inputEl.value = String(param.current_value);
+            inputEl.value = String(rawToDisplay(param, param.current_value));
         }
     }
     wrapper.appendChild(inputEl);
@@ -332,7 +366,9 @@ function renderParameterCard(param) {
     const rangeHint = document.createElement('span');
     rangeHint.className = 'settings-hint';
     const unit = param.unit ? ` ${param.unit}` : '';
-    rangeHint.textContent = `Zakres: ${param.min_value} - ${param.max_value}${unit}`;
+    rangeHint.textContent = param.value_map
+        ? `Zakres: ${param.min_value} - ${param.max_value}${unit}`
+        : `Zakres: ${formatDisplayNumber(param, param.min_value)} – ${formatDisplayNumber(param, param.max_value)}${unit}`;
     wrapper.appendChild(rangeHint);
 
     const btn = document.createElement('button');
@@ -346,16 +382,21 @@ function renderParameterCard(param) {
 }
 
 async function setParameter(param, inputEl, currentEl) {
-    const rawValue = inputEl.value;
-    const value = parseInt(rawValue, 10);
+    const rawText = String(inputEl.value || '').trim().replace(',', '.');
+    const isSelect = inputEl.tagName === 'SELECT';
+    const parsed = isSelect ? parseInt(rawText, 10) : Number(rawText);
 
-    if (Number.isNaN(value)) {
+    if (rawText === '' || !Number.isFinite(parsed)) {
         showBoilerControlMsg('Podaj poprawną wartość liczbową.', 'error');
         return;
     }
 
+    const value = isSelect ? parsed : displayToRaw(param, parsed);
     if (value < param.min_value || value > param.max_value) {
-        showBoilerControlMsg(`Wartość poza zakresem ${param.min_value}-${param.max_value}.`, 'error');
+        const range = isSelect
+            ? `${param.min_value}-${param.max_value}`
+            : `${formatDisplayNumber(param, param.min_value)} – ${formatDisplayNumber(param, param.max_value)}`;
+        showBoilerControlMsg(`Wartość poza zakresem ${range}.`, 'error');
         return;
     }
 

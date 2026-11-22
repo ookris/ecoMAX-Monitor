@@ -343,12 +343,17 @@ function updateDashboard(data) {
     setVal('val-temp-cwu-set', formatTemp(data.temp_cwu_set));
 
     // Parametry operacyjne
-    setVal('val-boiler-power', formatVal(data.boiler_power));
-    setVal('val-boiler-power-kw', formatVal(data.boiler_power_kw));
+    updateBoilerPowerTile(data);
     setVal('val-fan-power', formatVal(data.fan_power));
     setVal('val-flame', formatVal(data.flame || data.temp_optical));
     setVal('val-fuel-stream', formatVal(data.fuel_stream));
-    setVal('val-fuel-level', formatVal(data.fuel_level));
+    if (data.fuel_level_not_set) {
+        setVal('val-fuel-level', 'nie ustawiono');
+        setVal('val-fuel-level-unit', '');
+    } else {
+        setVal('val-fuel-level', formatVal(data.fuel_level));
+        setVal('val-fuel-level-unit', '%');
+    }
 
     // Wskaźniki: temperatura względem zadanej, procent pracy
     setGauge('gauge-temp-co', data.temp_co, data.temp_co_set, GAUGE_MAX_CO);
@@ -371,6 +376,44 @@ function updateDashboard(data) {
         setVal('val-ignitions', data.ignitions || '--');
         setVal('val-work-100', data.work_time_100 || '--');
         setVal('val-work-50', data.work_time_50 || '--');
+    }
+}
+
+// Kafel mocy: % (ze sterownika lub wyliczony z mocy nominalnej), a gdy % jest
+// niedostępny - sama moc w kW. Moc w kW jest szacowana przez sterownik.
+function updateBoilerPowerTile(data) {
+    const hasPercent = data.boiler_power !== null && data.boiler_power !== undefined;
+    const detailEl = document.getElementById('boiler-power-detail');
+    if (hasPercent) {
+        setVal('val-boiler-power', formatVal(data.boiler_power));
+        setVal('val-boiler-power-unit', '%');
+        setVal('val-boiler-power-kw', formatVal(data.boiler_power_kw));
+        if (detailEl) detailEl.style.display = '';
+    } else {
+        setVal('val-boiler-power', formatVal(data.boiler_power_kw));
+        setVal('val-boiler-power-unit', 'kW');
+        if (detailEl) detailEl.style.display = 'none';
+    }
+    const tile = document.getElementById('tile-power');
+    if (tile) {
+        tile.title = data.boiler_power_source === 'calculated'
+            ? 'Obciążenie % wyliczone z mocy w kW i mocy nominalnej kotła z ustawień'
+            : '';
+    }
+}
+
+async function loadFuelInfo() {
+    try {
+        const resp = await fetch('/api/fuel-info');
+        const json = await resp.json();
+        const value = json?.data?.calorific_value_kwh_kg;
+        const el = document.getElementById('boiler-power-calorific');
+        if (el && value !== null && value !== undefined) {
+            setVal('val-calorific', Number(value).toLocaleString('pl-PL', { maximumFractionDigits: 1 }));
+            el.style.display = '';
+        }
+    } catch (e) {
+        // Informacja pomocnicza - brak nie blokuje dashboardu.
     }
 }
 
@@ -1216,6 +1259,7 @@ document.addEventListener('DOMContentLoaded', () => {
     initAlerts();
     loadCosts();
     loadTempStats24h();
+    loadFuelInfo();
     _intervals.push(setInterval(loadCosts, 300000));
     _intervals.push(setInterval(loadTempStats24h, TEMP_STATS_REFRESH_MS));
 

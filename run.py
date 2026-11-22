@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from alerts import AlertEngine
 from database import Database
+from derived_data import apply_config_overrides
 from econet.connection import EW11AConnection
 from econet.decoder import BoilerData
 from logger import setup_file_logging, cleanup_old_logs
@@ -77,8 +78,9 @@ def parse_args():
 class Simulator:
     """Symulator danych z kotla (do testow bez sprzetu)."""
 
-    def __init__(self, on_data_callback, interval=5):
+    def __init__(self, on_data_callback, interval=5, preprocess_callback=None):
         self.on_data_callback = on_data_callback
+        self.preprocess_callback = preprocess_callback
         self.interval = interval
         self._running = False
         self._thread = None
@@ -158,6 +160,8 @@ class Simulator:
             data.work_time_50 = 820
             data.work_time_33 = 1100
 
+            if self.preprocess_callback:
+                self.preprocess_callback(data)
             with self._lock:
                 self._last_data = data
             self.frames_received += 1
@@ -223,9 +227,16 @@ def main():
             db.save_measurement(boiler_data.to_dict())
             last_save_time = now
 
+    def preprocess_data(boiler_data):
+        # Korekty zalezne od ustawien (poziom paliwa, moc %) - stosowane przed
+        # opublikowaniem danych w connection.last_data, aby REST API, /api/ha,
+        # /metrics i WebSocket widzialy te same wartosci.
+        apply_config_overrides(boiler_data, db.get_all_config())
+
     # Polaczenie z EW11A lub symulator
     if args.simulate:
-        connection = Simulator(on_data_callback=on_new_data, interval=read_interval)
+        connection = Simulator(on_data_callback=on_new_data, interval=read_interval,
+                               preprocess_callback=preprocess_data)
         logger.info("=== Tryb SYMULACJI ===")
     else:
         connection = EW11AConnection(
@@ -233,6 +244,7 @@ def main():
             port=ew11a_port,
             on_data_callback=on_new_data,
             read_interval=read_interval,
+            preprocess_callback=preprocess_data,
         )
         logger.info("Laczenie z EW11A: %s:%d", ew11a_host, ew11a_port)
 

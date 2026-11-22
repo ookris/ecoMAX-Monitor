@@ -160,9 +160,10 @@
 
         <div class="tile" id="tile-power">
             <div class="tile-head"><iconify-icon icon="mdi:lightning-bolt-outline" class="tile-icon"></iconify-icon><span class="tile-label">Moc kotła</span></div>
-            <div class="tile-value"><span id="val-boiler-power">--</span><small>%</small></div>
+            <div class="tile-value"><span id="val-boiler-power">--</span><small id="val-boiler-power-unit">%</small></div>
             <div class="meter" aria-hidden="true"><div class="meter-fill" id="meter-boiler-power"></div></div>
-            <div class="tile-set"><span id="val-boiler-power-kw">--</span> kW</div>
+            <div class="tile-set" id="boiler-power-detail"><span id="val-boiler-power-kw">--</span> kW (szacowana)</div>
+            <div class="tile-set" id="boiler-power-calorific" style="display:none" title="Sterownik szacuje moc w kW ze strumienia paliwa i kaloryczności ustawionej w sterowniku">Kaloryczność paliwa <strong><span id="val-calorific">--</span> kWh/kg</strong></div>
         </div>
 
         <div class="tile" id="tile-fan">
@@ -179,7 +180,7 @@
         <div class="tile" id="tile-fuel">
             <div class="tile-head"><iconify-icon icon="mdi:grain" class="tile-icon"></iconify-icon><span class="tile-label">Strumień paliwa</span></div>
             <div class="tile-value"><span id="val-fuel-stream">--</span><small>kg/h</small></div>
-            <div class="tile-set">Poziom w zasobniku <strong><span id="val-fuel-level">--</span>%</strong></div>
+            <div class="tile-set">Poziom w zasobniku <strong><span id="val-fuel-level">--</span><span id="val-fuel-level-unit">%</span></strong></div>
         </div>
 
         <div class="tile" id="tile-cost">

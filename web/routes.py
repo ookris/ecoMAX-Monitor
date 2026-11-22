@@ -23,11 +23,20 @@ from zoneinfo import available_timezones
 from flask import Blueprint, jsonify, render_template, request, Response, send_file
 
 from logger import read_log_lines, get_log_file_path
-from econet.decoder import FUEL_STREAM_MAX
-from econet.boiler_control import PARAMETERS, PARAMETERS_BY_KEY, format_parameter_value
+from econet.decoder import FUEL_STREAM_MAX, MODE_NAMES
+from econet.boiler_control import (
+    FUEL_CALORIFIC_VALUE_INDEX,
+    PARAMETERS,
+    PARAMETERS_BY_KEY,
+    format_parameter_value,
+)
+from derived_data import apply_config_overrides, is_fuel_level_not_set, parse_nominal_power
 from sensors import DASHBOARD_TILE_DEFINITIONS, DASHBOARD_TILE_KEYS
 
 bp = Blueprint('main', __name__)
+
+# Czas startu procesu - podstawa dla `uptime` w /api/status.
+_APP_STARTED_AT = time.time()
 
 try:
     from eventlet.green.urllib import request as green_urllib_request
@@ -82,6 +91,10 @@ PARAMETERS_METADATA = [
     {'key': 'temp_fireplace',    'label': 'Temperatura kominka',                 'unit': '°C',  'group': 'Temperatury'},
     {'key': 'flame',             'label': 'Sygnał optyczny płomienia',           'unit': '°C',  'group': 'Temperatury'},
     {'key': 'total_gain',        'label': 'Zysk całkowity',                      'unit': None,   'group': 'Temperatury'},
+    {'key': 'temp_hydraulic_coupler', 'label': 'Temperatura sprzęgła hydraulicznego', 'unit': '°C', 'group': 'Temperatury'},
+    {'key': 'temp_exchanger',    'label': 'Temperatura wymiennika',              'unit': '°C',  'group': 'Temperatury'},
+    {'key': 'temp_air_in',       'label': 'Temperatura powietrza (wlot)',        'unit': '°C',  'group': 'Temperatury'},
+    {'key': 'temp_air_out',      'label': 'Temperatura powietrza (wylot)',       'unit': '°C',  'group': 'Temperatury'},
     # ----- Temperatury zadane -----
     {'key': 'temp_co_set',       'label': 'Temperatura zadana CO',               'unit': '°C',  'group': 'Temperatury zadane'},
     {'key': 'temp_cwu_set',      'label': 'Temperatura zadana CWU',              'unit': '°C',  'group': 'Temperatury zadane'},
@@ -89,7 +102,7 @@ PARAMETERS_METADATA = [
     {'key': 'fan_power',         'label': 'Moc wentylatora',                     'unit': '%',   'group': 'Moc i paliwo'},
     {'key': 'blower',            'label': 'Moc dmuchawy (raw)',                  'unit': '%',   'group': 'Moc i paliwo'},
     {'key': 'boiler_power',      'label': 'Moc kotła (%)',                       'unit': '%',   'group': 'Moc i paliwo'},
-    {'key': 'boiler_power_kw',   'label': 'Moc kotła (kW)',                      'unit': 'kW',  'group': 'Moc i paliwo'},
+    {'key': 'boiler_power_kw',   'label': 'Moc kotła (kW, szacowana przez sterownik)', 'unit': 'kW', 'group': 'Moc i paliwo'},
     {'key': 'fuel_level',        'label': 'Poziom paliwa',                       'unit': '%',   'group': 'Moc i paliwo'},
     {'key': 'fuel_stream',       'label': 'Strumień paliwa',                     'unit': 'kg/h','group': 'Moc i paliwo'},
     # ----- Pompy i aktory -----
@@ -138,9 +151,17 @@ def _normalize_mode_name(value):
 
 
 def _normalize_mode_name_in_row(row):
+    """Ujednolic nazwe trybu; kod trybu ma pierwszenstwo przed zapisana nazwa.
+
+    Dzieki temu wiersze zapisane w bazie przed poprawka nazw trybow
+    (np. 1 = "Zatrzymany", 6 = "Czyszczenie") pokazuja aktualne nazwy.
+    """
     if not isinstance(row, dict):
         return row
-    if 'mode_name' in row:
+    mode = row.get('mode')
+    if isinstance(mode, int) and not isinstance(mode, bool) and mode in MODE_NAMES:
+        row['mode_name'] = MODE_NAMES[mode]
+    elif 'mode_name' in row:
         row['mode_name'] = _normalize_mode_name(row.get('mode_name'))
     return row
 
@@ -570,6 +591,11 @@ def _resolve_boiler_write_request(item_payload: dict, *, use_limits_cache: bool 
             old_value = str(ctrl_limits.get('value'))
 
     if value < min_value or value > max_value:
+        if param and (param.scale != 1 or param.display_offset != 0):
+            def _fmt(raw):
+                shown = param.to_display(raw)
+                return f'{shown:g}'.replace('.', ',') if isinstance(shown, float) else str(shown)
+            raise ValueError(f'Wartość poza zakresem {_fmt(min_value)}-{_fmt(max_value)} (surowo {min_value}-{max_value})')
         raise ValueError(f'Wartość poza zakresem {min_value}-{max_value}')
 
     return {
@@ -1158,6 +1184,8 @@ def get_current_data():
             )
 
         _normalize_mode_name_in_row(data)
+        if _database:
+            apply_config_overrides(data, _database.get_all_config())
         return jsonify({
             'status': 'ok',
             'data': data,
@@ -1167,6 +1195,7 @@ def get_current_data():
     latest = _database.get_latest() if _database else None
     if latest:
         _normalize_mode_name_in_row(latest)
+        apply_config_overrides(latest, _database.get_all_config())
         return jsonify({
             'status': 'ok',
             'data': latest,
@@ -1260,6 +1289,8 @@ def get_boiler_control_parameters():
             'min_value': min_value,
             'max_value': max_value,
             'step': param.step,
+            'scale': param.scale,
+            'display_offset': param.display_offset,
             'value_map': param.value_map,
             'current_value': current_value,
             'current_value_text': format_parameter_value(param, current_value),
@@ -2007,6 +2038,31 @@ def get_costs():
     })
 
 
+@bp.route('/api/fuel-info')
+def get_fuel_info():
+    """Informacje o paliwie i mocy: kalorycznosc ze sterownika, moc nominalna z ustawien.
+
+    Moc kotla w kW raportowana przez sterownik jest szacowana na podstawie
+    strumienia paliwa i kalorycznosci ustawionej w sterowniku (parametr 88),
+    dlatego UI pokazuje ja razem z ta kalorycznoscia.
+    """
+    calorific = None
+    params = _get_ecomax_limits_cached(force_refresh=False)
+    entry = params.get(FUEL_CALORIFIC_VALUE_INDEX) if params else None
+    if entry and entry.get('available') and entry.get('value') is not None:
+        calorific = PARAMETERS_BY_KEY['FUEL_CALORIFIC_VALUE'].to_display(entry['value'])
+
+    cfg = _database.get_all_config() if _database else {}
+    return jsonify({
+        'status': 'ok',
+        'data': {
+            'calorific_value_kwh_kg': calorific,
+            'boiler_nominal_power_kw': parse_nominal_power(cfg),
+            'fuel_level_not_set': is_fuel_level_not_set(cfg),
+        },
+    })
+
+
 @bp.route('/api/report')
 def get_report():
     """Raport dzienny - zuzycie paliwa i liczba pomiarow per dzien."""
@@ -2143,6 +2199,7 @@ def set_config():
         'log_retention_days':     (1, 365),
         'alert_no_connection_min':(1, 1440),
         'log_enabled':            (0, 1),
+        'fuel_level_not_set':     (0, 1),
     }
     _FLOAT_RANGES = {
         'fuel_price_per_ton':   (0.0, 1_000_000.0),
@@ -2184,6 +2241,21 @@ def set_config():
                 rejected.append({'key': key, 'reason': f'value out of range [{lo}, {hi}]'})
                 continue
             value_to_store = str(v)
+
+        elif key == 'boiler_nominal_power_kw':
+            v = str(value if value is not None else '').strip()
+            if v == '':
+                value_to_store = ''
+            else:
+                try:
+                    fv = _parse_float_maybe_comma(v)
+                except (ValueError, TypeError):
+                    rejected.append({'key': key, 'reason': 'expected number'})
+                    continue
+                if not (0.1 <= fv <= 1000.0):
+                    rejected.append({'key': key, 'reason': 'value out of range [0.1, 1000]'})
+                    continue
+                value_to_store = str(fv)
 
         elif key == 'ew11a_host':
             v = str(value).strip()
@@ -2581,11 +2653,11 @@ def restart_app():
         )
         if result.returncode == 0:
             return jsonify({'status': 'ok', 'message': 'Restart zlecony'})
-            return jsonify({'status': 'error', 'message': result.stderr.strip() or 'Błąd restartu'}), 500
+        return jsonify({'status': 'error', 'message': result.stderr.strip() or 'Błąd restartu'}), 500
     except subprocess.TimeoutExpired:
-            return jsonify({'status': 'error', 'message': 'Timeout - brak odpowiedzi systemd'}), 500
+        return jsonify({'status': 'error', 'message': 'Timeout - brak odpowiedzi systemd'}), 500
     except FileNotFoundError:
-            return jsonify({'status': 'error', 'message': 'Polecenie systemctl niedostępne na tym systemie'}), 500
+        return jsonify({'status': 'error', 'message': 'Polecenie systemctl niedostępne na tym systemie'}), 500
     except Exception as e:
         return jsonify({'status': 'error', 'message': str(e)}), 500
 
@@ -2734,7 +2806,8 @@ def download_logs():
 def get_status():
     """Status polaczenia i aplikacji."""
     return jsonify({
-        'uptime': time.time(),
+        'uptime': round(time.time() - _APP_STARTED_AT, 1),
+        'started_at': _APP_STARTED_AT,
         'connection': _connection.get_status() if _connection else None,
     })
 

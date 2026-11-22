@@ -20,7 +20,7 @@ def create_app():
         static_folder='static',
     )
 
-    app.config['ASSET_VERSION'] = os.environ.get('ASSET_VERSION', '20261122a')
+    app.config['ASSET_VERSION'] = os.environ.get('ASSET_VERSION', '20261122b')
 
     @app.context_processor
     def inject_asset_version():

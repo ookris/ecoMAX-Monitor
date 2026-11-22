@@ -9,7 +9,8 @@ const FIELDS = [
     'alert_temp_flue_max', 'alert_temp_co_min',
     'alert_fuel_level_min', 'alert_no_connection_min',
     'alert_retention_mode', 'alert_retention_days', 'alert_retention_count',
-    'fuel_price_per_ton', 'db_retention_days',
+    'fuel_price_per_ton', 'fuel_level_not_set', 'boiler_nominal_power_kw',
+    'db_retention_days',
     'log_enabled', 'log_retention_days',
     'time_zone', 'time_ntp_server',
 ];
@@ -29,6 +30,8 @@ const FIELD_LABELS = {
     alert_retention_days: 'Przechowywanie alertów (dni)',
     alert_retention_count: 'Maksymalna liczba alertów',
     fuel_price_per_ton: 'Cena paliwa (PLN / tona)',
+    fuel_level_not_set: 'Poziom paliwa nie jest ustawiony w sterowniku',
+    boiler_nominal_power_kw: 'Moc nominalna kotła (kW)',
     db_retention_days: 'Przechowywanie historii (dni)',
     log_enabled: 'Włącz logowanie do pliku',
     log_retention_days: 'Przechowywanie logów (dni)',
@@ -42,6 +45,12 @@ const RESTART_MONITOR_TIMEOUT_MS = 90000;
 
 function scrollToTop() {
     window.scrollTo({ top: 0, behavior: 'smooth' });
+}
+
+function updateFuelLevelInputs() {
+    const notSet = document.getElementById('fuel_level_not_set');
+    const minLevel = document.getElementById('alert_fuel_level_min');
+    if (notSet && minLevel) minLevel.disabled = notSet.checked;
 }
 
 function updateAlertRetentionInputs() {
@@ -130,6 +139,7 @@ async function loadSettings() {
 
             setVisibleSensorCheckboxes(parseVisibleSensors(json.data.visible_sensors, availableSensors));
             updateAlertRetentionInputs();
+            updateFuelLevelInputs();
         }
     } catch (e) {
         showMsg('Błąd ładowania ustawień: ' + e.message, 'error');
@@ -151,6 +161,7 @@ const NUMERIC_FIELDS = {
     'alert_retention_days':   { min: 1,   max: 3650,  integer: true  },
     'alert_retention_count':  { min: 1,   max: 50000, integer: true  },
     'fuel_price_per_ton':     { min: 1,   max: 100000,integer: false },
+    'boiler_nominal_power_kw':{ min: 0.1, max: 1000,  integer: false, optional: true },
     'db_retention_days':      { min: 1,   max: 365,   integer: true  },
     'log_retention_days':     { min: 1,   max: 365,   integer: true  },
 };
@@ -171,6 +182,11 @@ async function saveSettings() {
                 const normalizedValue = rule.integer ? String(rawValue).trim() : normalizeDecimalString(rawValue);
                 if (!rule.integer && rawValue !== normalizedValue) {
                     el.value = normalizedValue;
+                }
+
+                if (rule.optional && String(normalizedValue).trim() === '') {
+                    payload[key] = '';
+                    continue;
                 }
 
                 const num = rule.integer
@@ -521,5 +537,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const modeEl = document.getElementById('alert_retention_mode');
     if (modeEl) modeEl.addEventListener('change', updateAlertRetentionInputs);
     updateAlertRetentionInputs();
+    const fuelNotSetEl = document.getElementById('fuel_level_not_set');
+    if (fuelNotSetEl) fuelNotSetEl.addEventListener('change', updateFuelLevelInputs);
     loadTimeStatus();
 });

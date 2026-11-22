@@ -28,6 +28,28 @@ _STAT_QUERIES = {
 }
 
 
+# Kolumny tabeli measurements zapisywane przez save_measurement (poza id).
+_MEASUREMENT_COLUMNS: tuple[str, ...] = (
+    'timestamp', 'temp_co', 'temp_feeder', 'temp_cwu',
+    'temp_external', 'temp_back', 'temp_flue_gas', 'temp_optical',
+    'temp_co_set', 'temp_cwu_set', 'fan_power', 'boiler_power',
+    'boiler_power_kw', 'fuel_level', 'fuel_stream',
+    'mode', 'mode_name', 'pump_co', 'pump_cwu', 'pump_circulation',
+    'flame', 'blower', 'fuel_burned_kg', 'ignitions',
+    'boiler_power_source',
+)
+
+# Kolumny dodane po pierwszej wersji schematu: migracja addytywna (ALTER TABLE ADD COLUMN).
+_MEASUREMENT_ADDED_COLUMNS: dict[str, str] = {
+    'boiler_power_source': 'TEXT',
+}
+
+_INSERT_MEASUREMENT_SQL = (
+    f"INSERT INTO measurements ({', '.join(_MEASUREMENT_COLUMNS)}) "  # noqa: S608
+    f"VALUES ({', '.join(':' + c for c in _MEASUREMENT_COLUMNS)})"
+)
+
+
 class Database:
     """Zarzadza baza SQLite z pomiarami."""
 
@@ -56,6 +78,8 @@ class Database:
         'alert_temp_flue_max':    '250',
         'alert_temp_co_min':      '30',
         'alert_fuel_level_min':   '15',
+        'fuel_level_not_set':     '0',
+        'boiler_nominal_power_kw': '',
         'alert_no_connection_min': '5',
         'alert_retention_mode':   'days',
         'alert_retention_days':   '30',
@@ -104,6 +128,7 @@ class Database:
                 ignitions INTEGER
             )
         """)
+        self._ensure_columns('measurements', _MEASUREMENT_ADDED_COLUMNS)
         self._conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_timestamp
             ON measurements(timestamp)
@@ -148,31 +173,25 @@ class Database:
         """)
         self._conn.commit()
 
+    def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
+        """Dodaj brakujace kolumny (migracja addytywna istniejacych baz)."""
+        existing = {row['name'] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+        for name, col_type in columns.items():
+            if name not in existing:
+                self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {col_type}")
+                logger.info("Migracja bazy: dodano kolumne %s.%s", table, name)
+
     def save_measurement(self, data: dict[str, Any]) -> None:
         """Zapisz pomiar do bazy.
 
         Args:
-            data: BoilerData.to_dict() lub slownik z danymi
+            data: BoilerData.to_dict() lub slownik z danymi; brakujace klucze
+                zapisywane sa jako NULL.
         """
+        params = {column: data.get(column) for column in _MEASUREMENT_COLUMNS}
         with self._lock:
             try:
-                self._conn.execute("""
-                    INSERT INTO measurements (
-                        timestamp, temp_co, temp_feeder, temp_cwu,
-                        temp_external, temp_back, temp_flue_gas, temp_optical,
-                        temp_co_set, temp_cwu_set, fan_power, boiler_power,
-                        boiler_power_kw, fuel_level, fuel_stream,
-                        mode, mode_name, pump_co, pump_cwu, pump_circulation,
-                        flame, blower, fuel_burned_kg, ignitions
-                    ) VALUES (
-                        :timestamp, :temp_co, :temp_feeder, :temp_cwu,
-                        :temp_external, :temp_back, :temp_flue_gas, :temp_optical,
-                        :temp_co_set, :temp_cwu_set, :fan_power, :boiler_power,
-                        :boiler_power_kw, :fuel_level, :fuel_stream,
-                        :mode, :mode_name, :pump_co, :pump_cwu, :pump_circulation,
-                        :flame, :blower, :fuel_burned_kg, :ignitions
-                    )
-                """, data)
+                self._conn.execute(_INSERT_MEASUREMENT_SQL, params)
                 self._conn.commit()
             except sqlite3.Error as e:
                 logger.error("Blad zapisu do bazy: %s", e)

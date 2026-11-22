@@ -5,3 +5,4 @@
 
 /data/*.db
 /data/logs/
+/tests/__pycache__

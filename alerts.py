@@ -68,8 +68,11 @@ class AlertEngine:
                         f'Temperatura CO {boiler_data.temp_co:.1f}\u00b0C '
                         f'ponizej progu {limit:.0f}\u00b0C')
 
-        # Niski poziom paliwa
-        if boiler_data.fuel_level is not None:
+        # Niski poziom paliwa (brak wartosci, np. poziom nieustawiony w sterowniku,
+        # wygasza ewentualny aktywny alert).
+        if boiler_data.fuel_level is None:
+            self._check('fuel_low', False, '')
+        else:
             try:
                 limit = float(cfg.get('alert_fuel_level_min', '15'))
             except (ValueError, TypeError):
