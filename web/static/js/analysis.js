@@ -2,6 +2,8 @@ let modeShareChart = null;
 let fuelCostChart = null;
 let deltaTrendChart = null;
 let modeShareCompareChart = null;
+let mixerTrendChart = null;
+let dailyModesChart = null;
 
 const MODE_COLORS = window.MODE_COLORS || {
     '-1': '#b0bec5',
@@ -171,6 +173,7 @@ function updateRangeLabels(hours) {
     setRangeLabelText('ana-range-summary-label', label);
     setRangeLabelText('ana-range-modes-label', label);
     setRangeLabelText('ana-range-delta-label', label);
+    setRangeLabelText('ana-range-mixer-label', label);
     setRangeLabelText('ana-range-anomalies-label', label);
     setRangeLabelText('ana-range-dayparts-label', label);
     setRangeLabelText('ana-range-compare-label', label);
@@ -1169,6 +1172,7 @@ async function loadSummary24h(hours = 24) {
         renderModeShareChart(metrics.modeShare);
         renderModeShareCompareChart(metrics.modeShare, modeShare7d, boundedHours);
         renderDeltaTrendChart(historyRows);
+        renderMixerTrendChart(historyRows);
         renderAnomalies({ ...metrics, rejectedFrames });
         renderDayPartBreakdown(dayPartBreakdown);
         renderWeeklyCompare(reportRows14);
@@ -1247,7 +1251,147 @@ async function loadReport(days = 7) {
     }
 }
 
+// ---- Mieszacz 1: zawór i temperatura ----
+
+function renderMixerTrendChart(historyRows) {
+    const canvas = document.getElementById('mixer-trend-chart');
+    if (!canvas || typeof Chart === 'undefined') return;
+    if (mixerTrendChart) {
+        mixerTrendChart.destroy();
+        mixerTrendChart = null;
+    }
+    const rows = prepareHistoryRows(historyRows)
+        .filter(row => Number.isFinite(Number(row.mixer1_temp)) || Number.isFinite(Number(row.mixer1_valve)));
+    if (!rows.length) {
+        setChartEmptyState('mixer-trend-empty', true, 'Brak danych mieszacza w wybranym zakresie (zapisywane od tej wersji aplikacji).');
+        return;
+    }
+    setChartEmptyState('mixer-trend-empty', false);
+    const num = (v) => (v === null || v === undefined || !Number.isFinite(Number(v)) ? null : Number(v));
+    mixerTrendChart = new Chart(canvas.getContext('2d'), {
+        type: 'line',
+        data: {
+            labels: rows.map(row => new Date(row.timestamp * 1000).toLocaleString('pl-PL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' })),
+            datasets: [
+                { label: 'Temperatura mieszacza [°C]', data: rows.map(r => num(r.mixer1_temp)), borderColor: '#e8590c', pointRadius: 0, tension: 0.2, yAxisID: 'yTemp' },
+                { label: 'Zadana [°C]', data: rows.map(r => num(r.mixer1_target)), borderColor: '#868e96', borderDash: [6, 4], pointRadius: 0, yAxisID: 'yTemp' },
+                { label: 'Otwarcie zaworu [%]', data: rows.map(r => num(r.mixer1_valve)), borderColor: '#3498db', backgroundColor: 'rgba(52, 152, 219, 0.15)', fill: true, pointRadius: 0, stepped: true, yAxisID: 'yValve' },
+            ],
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: { legend: { position: 'bottom' } },
+            scales: {
+                yTemp: { type: 'linear', position: 'left', title: { display: true, text: '°C' } },
+                yValve: { type: 'linear', position: 'right', min: 0, max: 100, grid: { drawOnChartArea: false }, title: { display: true, text: '%' } },
+            },
+        },
+    });
+}
+
+// ---- Cykle pracy (dzienne, z każdej ramki) ----
+
+function formatHoursMinutes(hours) {
+    const total = Math.round(Number(hours || 0) * 60);
+    const h = Math.floor(total / 60);
+    const m = total % 60;
+    return h ? `${h} h ${m} min` : `${m} min`;
+}
+
+function renderDailyModesChart(rows) {
+    const canvas = document.getElementById('daily-modes-chart');
+    if (!canvas || typeof Chart === 'undefined') return;
+    if (dailyModesChart) {
+        dailyModesChart.destroy();
+        dailyModesChart = null;
+    }
+    const withData = rows.filter(r => r.observed_hours > 0);
+    if (!withData.length) {
+        setChartEmptyState('daily-modes-empty', true, 'Brak danych – statystyki zbierane są od uruchomienia tej wersji aplikacji.');
+        return;
+    }
+    setChartEmptyState('daily-modes-empty', false);
+    const modes = [...new Set(withData.flatMap(r => Object.keys(r.modes).map(Number)))]
+        .sort((a, b) => modeVisualRank(a) - modeVisualRank(b));
+    dailyModesChart = new Chart(canvas.getContext('2d'), {
+        type: 'bar',
+        data: {
+            labels: withData.map(r => r.day),
+            datasets: modes.map(mode => ({
+                label: modeLabel(mode, (withData.find(r => r.modes[mode]) || {}).modes?.[mode]?.name),
+                data: withData.map(r => Number(((r.modes[mode] || {}).hours || 0).toFixed(2))),
+                backgroundColor: MODE_COLORS[mode] || '#777777',
+                borderWidth: 0,
+            })),
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { position: 'bottom' } },
+            scales: {
+                x: { stacked: true },
+                y: { stacked: true, suggestedMax: 24, title: { display: true, text: 'godziny' } },
+            },
+        },
+    });
+}
+
+function renderDailyCyclesTable(rows) {
+    const body = document.getElementById('daily-cycles-body');
+    if (!body) return;
+    body.textContent = '';
+    if (!rows.length) {
+        const tr = document.createElement('tr');
+        const td = document.createElement('td');
+        td.colSpan = 13;
+        td.textContent = 'Brak danych.';
+        tr.appendChild(td);
+        body.appendChild(tr);
+        return;
+    }
+    for (const r of [...rows].reverse()) {
+        const working = (r.modes['3'] || {}).hours || 0;
+        const cells = [
+            r.day,
+            `${formatNumber(r.coverage_percent, 0)}%`,
+            formatHoursMinutes(working),
+            String(r.work_cycles),
+            String(r.kindlings),
+            String(r.kindling_failures),
+            r.kindling_success_percent === null ? '--' : `${formatNumber(r.kindling_success_percent, 0)}%`,
+            `${formatNumber(r.feeder_minutes, 1)} min`,
+            formatHoursMinutes(r.fan_hours),
+            `${formatNumber(r.energy_kwh, 1)} kWh`,
+            `${formatNumber(r.fuel_kg, 1)} kg`,
+            `${formatNumber(r.cost_pln, 2)} zł`,
+            r.cost_per_kwh === null ? '--' : `${formatNumber(r.cost_per_kwh, 2)} zł`,
+        ];
+        const tr = document.createElement('tr');
+        for (const text of cells) {
+            const td = document.createElement('td');
+            td.textContent = text;
+            tr.appendChild(td);
+        }
+        body.appendChild(tr);
+    }
+}
+
+async function loadDailyAnalytics() {
+    try {
+        const resp = await fetch('/api/analytics/daily?days=14');
+        const json = await resp.json();
+        const rows = json.status === 'ok' && Array.isArray(json.data) ? json.data : [];
+        renderDailyModesChart(rows);
+        renderDailyCyclesTable(rows);
+    } catch (e) {
+        setChartEmptyState('daily-modes-empty', true, 'Błąd pobierania statystyk dziennych: ' + e.message);
+    }
+}
+
 document.addEventListener('DOMContentLoaded', async () => {
     await initAnalysisRangeControls();
     await loadSummary24h(selectedAnalysisHours);
+    await loadDailyAnalytics();
 });

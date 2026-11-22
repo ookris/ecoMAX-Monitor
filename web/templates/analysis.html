@@ -117,6 +117,54 @@
         <div id="delta-trend-empty" class="chart-empty-note"></div>
     </section>
 
+    <section class="chart-section" id="mixer-trend-section">
+        <div class="chart-header">
+            <h2>Mieszacz 1 – zawór i temperatura <span id="ana-range-mixer-label">(zakres)</span></h2>
+        </div>
+        <div class="chart-canvas-wrap chart-canvas-wrap-line">
+            <canvas id="mixer-trend-chart"></canvas>
+        </div>
+        <div id="mixer-trend-empty" class="chart-empty-note"></div>
+    </section>
+
+    <section class="chart-section">
+        <div class="chart-header">
+            <h2>Cykle pracy – czas w trybach na dzień (14 dni)</h2>
+        </div>
+        <p class="settings-hint">Liczone z każdej ramki sterownika (co ~2 s), niezależnie od interwału zapisu do bazy. Dane od chwili uruchomienia tej wersji aplikacji.</p>
+        <div class="chart-canvas-wrap chart-canvas-wrap-line">
+            <canvas id="daily-modes-chart"></canvas>
+        </div>
+        <div id="daily-modes-empty" class="chart-empty-note"></div>
+    </section>
+
+    <section class="report-section" id="daily-cycles-section">
+        <h2>Cykle pracy, rozpalenia i energia (dziennie)</h2>
+        <div class="parameters-table-wrap">
+            <table class="report-table" id="daily-cycles-table">
+                <thead>
+                    <tr>
+                        <th>Dzień</th>
+                        <th>Pokrycie</th>
+                        <th>Praca</th>
+                        <th>Cykle pracy</th>
+                        <th>Rozpalenia</th>
+                        <th>Nieudane</th>
+                        <th>Skuteczność</th>
+                        <th>Podajnik</th>
+                        <th>Wentylator</th>
+                        <th>Energia*</th>
+                        <th>Paliwo</th>
+                        <th>Koszt</th>
+                        <th>zł/kWh*</th>
+                    </tr>
+                </thead>
+                <tbody id="daily-cycles-body"></tbody>
+            </table>
+        </div>
+        <p class="settings-hint">* Energia szacowana przez sterownik ze strumienia paliwa i kaloryczności ustawionej w sterowniku. „Nieudane” – alarmy „Nieudana próba rozpalania” odczytane ze sterownika.</p>
+    </section>
+
     <section class="chart-section">
         <div class="chart-header">
             <h2>Czas w trybach <span id="ana-range-compare-label">(zakres)</span> vs 7 dni</h2>

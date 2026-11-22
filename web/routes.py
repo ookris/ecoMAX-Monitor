@@ -31,7 +31,11 @@ from econet.boiler_control import (
     format_parameter_value,
 )
 from derived_data import apply_config_overrides, is_fuel_level_not_set, parse_nominal_power
-from econet.alarms import alarm_name
+from econet.alarms import ALARM_KINDLING_FAILURE, alarm_name
+from analytics import (
+    METRIC_ENERGY, METRIC_FAN, METRIC_FEEDER, METRIC_FUEL, METRIC_KINDLINGS, METRIC_LIGHTER,
+    METRIC_LIGHTER_STARTS, METRIC_OBSERVED, METRIC_WORK_CYCLES, MODE_METRIC_PREFIX,
+)
 from econet.ecomax_parameters import ECOMAX_P_PARAMETERS
 from econet.mixer_parameters import MIXER_PARAMETERS, MIXER_PARAMETERS_BY_KEY, get_mixer_parameter_info
 from controller_sync import CONFIG_ALARMS_IMPORTED, CONFIG_REGDATA_SCHEMA, TASK_ALARMS, TASK_REGDATA_SCHEMA
@@ -421,6 +425,7 @@ _routes_lock = threading.Lock()
 _connection = None
 _database = None
 _controller_sync = None
+_operation_tracker = None
 _boiler_limits_cache_lock = threading.Lock()
 _boiler_limits_cache = {
     'cached_at': 0.0,
@@ -1219,13 +1224,14 @@ def _read_system_ntp_status() -> dict:
     return status
 
 
-def init_routes(connection, database, controller_sync=None):
-    """Ustaw referencje do polaczenia, bazy i synchronizacji ze sterownikiem."""
-    global _connection, _database, _controller_sync
+def init_routes(connection, database, controller_sync=None, operation_tracker=None):
+    """Ustaw referencje do polaczenia, bazy, synchronizacji ze sterownikiem i analityki."""
+    global _connection, _database, _controller_sync, _operation_tracker
     with _routes_lock:
         _connection = connection
         _database = database
         _controller_sync = controller_sync
+        _operation_tracker = operation_tracker
 
     # Zastosuj zapisana strefe czasowa na poziomie procesu,
     # aby czas wysylany przez WebSocket byl zgodny z konfiguracja aplikacji.
@@ -2308,6 +2314,77 @@ def get_fuel_info():
     })
 
 
+@bp.route('/api/analytics/daily')
+def get_analytics_daily():
+    """Dzienne podsumowanie pracy kotla (liczone z kazdej ramki przez OperationTracker).
+
+    Na dzien: czas obserwacji i w trybach, cykle pracy, rozpalenia i ich skutecznosc
+    (z alarmow sterownika "nieudana proba rozpalania"), czas pracy podajnika/wentylatora/
+    zapalarki, energia (szacowana przez sterownik) i paliwo, koszt i koszt kWh.
+    """
+    if not _database:
+        return jsonify({'status': 'error', 'message': 'Brak bazy danych'}), 500
+    days = request.args.get('days', 14, type=int) or 14
+    days = min(max(days, 1), 366)
+    # Dni kalendarzowe (odejmowanie 86400 s myli sie przy zmianie czasu letni/zimowy).
+    since_day = (datetime.date.today() - datetime.timedelta(days=days - 1)).isoformat()
+    stats = _database.get_daily_stats(since_day)
+
+    try:
+        price_per_ton = float(_database.get_config('fuel_price_per_ton', '1000'))
+    except (ValueError, TypeError):
+        price_per_ton = 1000.0
+
+    failures_by_day: dict[str, int] = defaultdict(int)
+    day_start = time.mktime(time.strptime(since_day, '%Y-%m-%d'))
+    for alarm in _database.get_controller_alarms(limit=None, since=day_start, code=ALARM_KINDLING_FAILURE):
+        failures_by_day[time.strftime('%Y-%m-%d', time.localtime(alarm['start_ts']))] += 1
+
+    result = []
+    for day in sorted(set(stats) | set(failures_by_day)):
+        metrics = stats.get(day, {})
+        observed = metrics.get(METRIC_OBSERVED, 0.0)
+        mode_hours = {}
+        for metric, value in metrics.items():
+            if metric.startswith(MODE_METRIC_PREFIX):
+                try:
+                    mode = int(metric[len(MODE_METRIC_PREFIX):])
+                except ValueError:
+                    continue
+                mode_hours[str(mode)] = {
+                    'name': MODE_NAMES.get(mode, f'Tryb {mode}'),
+                    'hours': round(value / 3600.0, 3),
+                    'percent': round(value / observed * 100.0, 1) if observed else None,
+                }
+        kindlings = int(round(metrics.get(METRIC_KINDLINGS, 0)))
+        failures = failures_by_day.get(day, 0)
+        energy = metrics.get(METRIC_ENERGY, 0.0)
+        fuel = metrics.get(METRIC_FUEL, 0.0)
+        cost = fuel / 1000.0 * price_per_ton
+        success_rate = None
+        if kindlings > 0:
+            success_rate = round(max(0.0, (kindlings - failures) / kindlings * 100.0), 1)
+        result.append({
+            'day': day,
+            'observed_hours': round(observed / 3600.0, 2),
+            'coverage_percent': round(min(100.0, observed / 86400.0 * 100.0), 1),
+            'modes': mode_hours,
+            'work_cycles': int(round(metrics.get(METRIC_WORK_CYCLES, 0))),
+            'kindlings': kindlings,
+            'kindling_failures': failures,
+            'kindling_success_percent': success_rate,
+            'lighter_starts': int(round(metrics.get(METRIC_LIGHTER_STARTS, 0))),
+            'feeder_minutes': round(metrics.get(METRIC_FEEDER, 0.0) / 60.0, 1),
+            'fan_hours': round(metrics.get(METRIC_FAN, 0.0) / 3600.0, 2),
+            'lighter_minutes': round(metrics.get(METRIC_LIGHTER, 0.0) / 60.0, 1),
+            'energy_kwh': round(energy, 2),
+            'fuel_kg': round(fuel, 2),
+            'cost_pln': round(cost, 2),
+            'cost_per_kwh': round(cost / energy, 3) if energy > 0 else None,
+        })
+    return jsonify({'status': 'ok', 'days': days, 'price_per_ton': price_per_ton, 'data': result})
+
+
 @bp.route('/api/report')
 def get_report():
     """Raport dzienny - zuzycie paliwa i liczba pomiarow per dzien."""
@@ -2865,6 +2942,8 @@ def reset_runtime_data():
 
     try:
         details = _database.reset_runtime_data()
+        if _operation_tracker is not None:
+            _operation_tracker.reset()
         return jsonify({
             'status': 'ok',
             'message': 'Wyczyszczono statystyki (pomiary i alerty). Konfiguracja została zachowana.',
@@ -2887,6 +2966,8 @@ def reset_all_data_and_config():
 
     try:
         details = _database.reset_all_data_and_config()
+        if _operation_tracker is not None:
+            _operation_tracker.reset()
         with _weather_cache_lock:
             _weather_data_cache.clear()
             _weather_place_cache.clear()

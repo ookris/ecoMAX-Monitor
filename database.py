@@ -210,6 +210,27 @@ class Database:
             CREATE INDEX IF NOT EXISTS idx_controller_alarms_start
             ON controller_alarms(start_ts DESC)
         """)
+        # Analityka: dzienne liczniki (dzien lokalny, metryka) i zdarzenia zmiany trybu.
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS daily_stats (
+                day TEXT NOT NULL,
+                metric TEXT NOT NULL,
+                value REAL NOT NULL DEFAULT 0,
+                PRIMARY KEY (day, metric)
+            )
+        """)
+        self._conn.execute("""
+            CREATE TABLE IF NOT EXISTS mode_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp REAL NOT NULL,
+                mode INTEGER NOT NULL,
+                previous_mode INTEGER
+            )
+        """)
+        self._conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_mode_events_timestamp
+            ON mode_events(timestamp)
+        """)
         self._conn.commit()
 
     def _ensure_columns(self, table: str, columns: dict[str, str]) -> None:
@@ -495,6 +516,8 @@ class Database:
                     "DELETE FROM measurements WHERE timestamp < ?",
                     (cutoff,)
                 )
+                # Zdarzenia trybu - ta sama retencja co pomiary; daily_stats (male) zostaja.
+                self._conn.execute("DELETE FROM mode_events WHERE timestamp < ?", (cutoff,))
                 self._conn.commit()
                 if result.rowcount > 0:
                     logger.info("Usunieto %d starych rekordow", result.rowcount)
@@ -554,12 +577,14 @@ class Database:
                     "DELETE FROM alerts"
                 ).rowcount
                 self._conn.execute("DELETE FROM controller_alarms")
+                self._conn.execute("DELETE FROM daily_stats")
+                self._conn.execute("DELETE FROM mode_events")
                 # Po wyczyszczeniu historia alarmow zostanie zaimportowana ponownie bez alertow.
                 self._conn.execute("DELETE FROM config WHERE key = 'controller_alarms_imported'")
 
                 # Reset licznikow AUTOINCREMENT dla tabel runtime.
                 self._conn.execute(
-                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts', 'controller_alarms')"
+                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts', 'controller_alarms', 'mode_events')"
                 )
                 self._conn.commit()
 
@@ -591,9 +616,11 @@ class Database:
                     "DELETE FROM config"
                 ).rowcount
                 self._conn.execute("DELETE FROM controller_alarms")
+                self._conn.execute("DELETE FROM daily_stats")
+                self._conn.execute("DELETE FROM mode_events")
 
                 self._conn.execute(
-                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts', 'controller_alarms')"
+                    "DELETE FROM sqlite_sequence WHERE name IN ('measurements', 'alerts', 'controller_alarms', 'mode_events')"
                 )
                 self._conn.commit()
 
@@ -780,6 +807,69 @@ class Database:
                 return [dict(r) for r in self._conn.execute(query, params).fetchall()]
             except sqlite3.Error as e:
                 logger.error("Blad odczytu alarmow sterownika: %s", e)
+                return []
+
+    def add_daily_stats(self, increments: dict[tuple[str, str], float]) -> bool:
+        """Dodaj przyrosty metryk {(dzien, metryka): przyrost}. Zwraca False przy bledzie."""
+        if not increments:
+            return True
+        with self._lock:
+            try:
+                self._conn.executemany(
+                    """
+                    INSERT INTO daily_stats(day, metric, value) VALUES (?, ?, ?)
+                    ON CONFLICT(day, metric) DO UPDATE SET value = value + excluded.value
+                    """,
+                    [(day, metric, float(value)) for (day, metric), value in increments.items()],
+                )
+                self._conn.commit()
+                return True
+            except sqlite3.Error as e:
+                self._conn.rollback()
+                logger.error("Blad zapisu statystyk dziennych: %s", e)
+                return False
+
+    def get_daily_stats(self, since_day: str) -> dict[str, dict[str, float]]:
+        """Statystyki dzienne od `since_day` (YYYY-MM-DD): {dzien: {metryka: wartosc}}."""
+        result: dict[str, dict[str, float]] = {}
+        with self._lock:
+            try:
+                rows = self._conn.execute(
+                    "SELECT day, metric, value FROM daily_stats WHERE day >= ? ORDER BY day",
+                    (since_day,),
+                ).fetchall()
+            except sqlite3.Error as e:
+                logger.error("Blad odczytu statystyk dziennych: %s", e)
+                return result
+        for row in rows:
+            result.setdefault(row['day'], {})[row['metric']] = row['value']
+        return result
+
+    def add_mode_event(self, *, timestamp: float, mode: int, previous_mode: Optional[int]) -> bool:
+        with self._lock:
+            try:
+                self._conn.execute(
+                    "INSERT INTO mode_events(timestamp, mode, previous_mode) VALUES (?, ?, ?)",
+                    (timestamp, mode, previous_mode),
+                )
+                self._conn.commit()
+                return True
+            except sqlite3.Error as e:
+                logger.error("Blad zapisu zdarzenia trybu: %s", e)
+                return False
+
+    def get_mode_events(self, since: float, until: Optional[float] = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM mode_events WHERE timestamp >= ?"
+        params: list[Any] = [since]
+        if until is not None:
+            query += " AND timestamp < ?"
+            params.append(until)
+        query += " ORDER BY timestamp ASC"
+        with self._lock:
+            try:
+                return [dict(r) for r in self._conn.execute(query, params).fetchall()]
+            except sqlite3.Error as e:
+                logger.error("Blad odczytu zdarzen trybu: %s", e)
                 return []
 
     def get_boiler_setting_changes(self, limit: int = 100) -> list[dict[str, Any]]:

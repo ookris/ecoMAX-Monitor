@@ -62,13 +62,16 @@ class EW11AConnection:
     RECONNECT_DELAY_MAX = 30
 
     def __init__(self, host, port, on_data_callback=None, read_interval=0,
-                 preprocess_callback=None):
+                 preprocess_callback=None, frame_callback=None):
         self.host = host
         self.port = port
         self.on_data_callback = on_data_callback
         # Wywolywany przed opublikowaniem danych w last_data (np. korekty z ustawien),
         # aby wszystkie endpointy widzialy juz skorygowane wartosci.
         self.preprocess_callback = preprocess_callback
+        # Wywolywany dla KAZDEJ wiarygodnej ramki danych (bez throttlingu read_interval),
+        # np. analityka czasu pracy. Musi byc szybki - dziala w watku odczytu.
+        self.frame_callback = frame_callback
         self.read_interval = max(0.0, float(read_interval or 0))
 
         self._socket = None
@@ -879,6 +882,12 @@ class EW11AConnection:
 
         now = time.time()
         self._apply_server_time(boiler_data, now)
+
+        if self.frame_callback:
+            try:
+                self.frame_callback(boiler_data)
+            except Exception as e:
+                logger.error("Blad w frame_callback: %s", e, exc_info=True)
 
         if self.read_interval > 0 and (now - self._last_callback_time) < self.read_interval:
             return
