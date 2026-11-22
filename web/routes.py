@@ -32,6 +32,8 @@ from econet.boiler_control import (
 )
 from derived_data import apply_config_overrides, is_fuel_level_not_set, parse_nominal_power
 from econet.alarms import alarm_name
+from econet.ecomax_parameters import ECOMAX_P_PARAMETERS
+from econet.mixer_parameters import MIXER_PARAMETERS, MIXER_PARAMETERS_BY_KEY, get_mixer_parameter_info
 from controller_sync import TASK_ALARMS
 from sensors import DASHBOARD_TILE_DEFINITIONS, DASHBOARD_TILE_KEYS
 
@@ -553,6 +555,41 @@ def _get_ecomax_limits_cached(force_refresh: bool = False) -> dict:
     return dict(parameters)
 
 
+_mixer_params_cache_lock = threading.Lock()
+_mixer_params_cache = {'cached_at': 0.0, 'mixers': {}}
+_MIXER_PARAMS_TTL_SEC = 5.0
+
+
+def _get_mixer_params_cached(force_refresh: bool = False) -> dict:
+    """Parametry mieszaczy ze sterownika (0x32/0xB2) z krotkim cache."""
+    if not (_connection and getattr(_connection, 'connected', False)
+            and hasattr(_connection, 'request_mixer_parameters')):
+        return {}
+    now = time.time()
+    with _mixer_params_cache_lock:
+        if not force_refresh and (now - _mixer_params_cache['cached_at']) <= _MIXER_PARAMS_TTL_SEC:
+            return dict(_mixer_params_cache['mixers'])
+    try:
+        mixers = _execute_blocking(_connection.request_mixer_parameters, timeout=2.0) or {}
+    except Exception:
+        mixers = {}
+    if mixers:
+        with _mixer_params_cache_lock:
+            _mixer_params_cache['cached_at'] = now
+            _mixer_params_cache['mixers'] = dict(mixers)
+    return dict(mixers)
+
+
+def _invalidate_controller_caches(target_type: str) -> None:
+    """Po udanym zapisie wymus ponowny odczyt wartosci i zakresow ze sterownika."""
+    if target_type == 'mixer':
+        with _mixer_params_cache_lock:
+            _mixer_params_cache['cached_at'] = 0.0
+    elif target_type == 'ecomax':
+        with _boiler_limits_cache_lock:
+            _boiler_limits_cache['cached_at'] = 0.0
+
+
 def update_boiler_limits_cache(parameters: dict) -> None:
     """Zaktualizuj cache parametrow sterownika (np. po zmianie wersji ramki 0x38)."""
     if not parameters:
@@ -580,6 +617,8 @@ def _resolve_boiler_write_request(item_payload: dict, *, use_limits_cache: bool 
     elif target_type in ('mixer', 'thermostat'):
         param = None
         index_raw = item_payload.get('index', None)
+        if index_raw is None and target_type == 'mixer' and key in MIXER_PARAMETERS_BY_KEY:
+            index_raw = MIXER_PARAMETERS_BY_KEY[key].index
         try:
             index_value = int(index_raw)
         except (TypeError, ValueError) as exc:
@@ -595,6 +634,26 @@ def _resolve_boiler_write_request(item_payload: dict, *, use_limits_cache: bool 
     min_value = param.min_value if param else 0
     max_value = param.max_value if param else 255
     old_value = None
+    display_param = param
+
+    if target_type == 'mixer':
+        display_param = get_mixer_parameter_info(index_value)
+        try:
+            mixer_index = int(target_index or 0)
+        except (TypeError, ValueError) as exc:
+            raise ValueError('target_index mieszacza musi być liczbą') from exc
+        mixers = _get_mixer_params_cached() if use_limits_cache else {}
+        if not mixers:
+            mixers = _get_mixer_params_cached(force_refresh=True)
+        ctrl_limits = mixers.get(mixer_index, {}).get(index_value)
+        if not ctrl_limits:
+            raise ValueError('Nie udało się odczytać zakresu parametru mieszacza ze sterownika - zapis wstrzymany')
+        if ctrl_limits:
+            if not ctrl_limits.get('available', True):
+                raise ValueError('Parametr niedostępny w tym sterowniku')
+            min_value = int(ctrl_limits['min_value'])
+            max_value = int(ctrl_limits['max_value'])
+            old_value = str(ctrl_limits.get('value'))
 
     if target_type == 'ecomax':
         controller_limits = {}
@@ -615,14 +674,16 @@ def _resolve_boiler_write_request(item_payload: dict, *, use_limits_cache: bool 
                 ctrl_limits = None
 
         if ctrl_limits:
+            if not ctrl_limits.get('available', True):
+                raise ValueError('Parametr niedostępny w tym sterowniku')
             min_value = int(ctrl_limits.get('min_value', min_value))
             max_value = int(ctrl_limits.get('max_value', max_value))
             old_value = str(ctrl_limits.get('value'))
 
     if value < min_value or value > max_value:
-        if param and (param.scale != 1 or param.display_offset != 0):
+        if display_param and (display_param.scale != 1 or display_param.display_offset != 0):
             def _fmt(raw):
-                shown = param.to_display(raw)
+                shown = display_param.to_display(raw)
                 return f'{shown:g}'.replace('.', ',') if isinstance(shown, float) else str(shown)
             raise ValueError(f'Wartość poza zakresem {_fmt(min_value)}-{_fmt(max_value)} (surowo {min_value}-{max_value})')
         raise ValueError(f'Wartość poza zakresem {min_value}-{max_value}')
@@ -1349,6 +1410,9 @@ def get_boiler_control_capabilities():
             'supports_schedule': True,
             'supports_schedule_raw': True,
             'supports_service_profile': True,
+            'supports_mixer_parameters': True,
+            'supports_power_control': True,
+            'supports_controller_alarms': True,
         },
     })
 
@@ -1401,6 +1465,9 @@ def get_boiler_control_device_info():
         'product_id': uid_info.get('product_id'),
         'model': uid_info.get('model'),
         'uid': uid_info.get('uid'),
+        'uid_hex': uid_info.get('uid_hex'),
+        'mode': getattr(last_data, 'mode', None) if last_data else None,
+        'mode_name': MODE_NAMES.get(getattr(last_data, 'mode', None)) if last_data else None,
         'mixers_available': mixers_available,
         'mixers_connected': mixers_connected,
         'thermostats_available': thermostats_available,
@@ -1413,6 +1480,142 @@ def get_boiler_control_device_info():
         result['uid_error'] = uid_error
 
     return jsonify({'status': 'ok', 'data': result})
+
+
+def _param_row(info, entry: Optional[dict]) -> dict:
+    """Wiersz parametru (ecoMAX lub mieszacz) z wartoscia surowa i wyswietlana."""
+    entry = entry or {}
+    available = bool(entry.get('available'))
+    value = entry.get('value') if available else None
+    return {
+        'key': info.key,
+        'index': info.index,
+        'label': info.label,
+        'unit': info.unit,
+        'scale': info.scale,
+        'display_offset': info.display_offset if hasattr(info, 'display_offset') else info.offset,
+        'available': available,
+        'value': value,
+        'display_value': info.to_display(value) if value is not None else None,
+        'min_value': entry.get('min_value') if available else None,
+        'max_value': entry.get('max_value') if available else None,
+    }
+
+
+@bp.route('/api/boiler-control/mixers', methods=['GET'])
+def get_boiler_control_mixers():
+    """Parametry mieszaczy (0x32/0xB2) z danymi na zywo z ramki 0x35."""
+    if not _is_boiler_control_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Brak uprawnień'}), 403
+    if not (_connection and getattr(_connection, 'connected', False)):
+        return jsonify({'status': 'error', 'message': 'Brak połączenia z modułem EW11A'}), 503
+
+    mixers = _get_mixer_params_cached(force_refresh=request.args.get('refresh') == '1')
+    if not mixers:
+        return jsonify({'status': 'error', 'message': 'Brak odpowiedzi sterownika (0xB2)'}), 504
+
+    last_data = _connection.last_data
+    live = getattr(last_data, 'mixer_data', []) if last_data else []
+    result = []
+    for mixer_index in sorted(mixers):
+        params = mixers[mixer_index]
+        if not any(p.get('available') for p in params.values()):
+            continue
+        live_entry = live[mixer_index] if mixer_index < len(live) else {}
+        rows = []
+        for info in MIXER_PARAMETERS:
+            row = _param_row(info, params.get(info.index))
+            row.update({'widget': info.widget, 'value_map': info.value_map})
+            rows.append(row)
+        result.append({
+            'index': mixer_index,
+            'name': f'Mieszacz {mixer_index + 1}',
+            'connected': live_entry.get('current_temp') is not None,
+            'live': live_entry,
+            'parameters': rows,
+        })
+    return jsonify({'status': 'ok', 'count': len(result), 'data': result})
+
+
+@bp.route('/api/boiler-control/controller-parameters', methods=['GET'])
+def get_controller_parameters_overview():
+    """Wszystkie parametry sterownika (0x31/0xB1) z polskimi nazwami - tylko odczyt."""
+    params = _get_ecomax_limits_cached(force_refresh=False)
+    if not params:
+        return jsonify({'status': 'error', 'message': 'Brak odpowiedzi sterownika (0xB1)'}), 504
+    catalog_indexes = {p.index for p in PARAMETERS}
+    rows = []
+    for info in ECOMAX_P_PARAMETERS:
+        entry = params.get(info.index)
+        if not entry or not entry.get('available'):
+            continue
+        row = _param_row(info, entry)
+        row.update({'group': info.group, 'editable_in_catalog': info.index in catalog_indexes})
+        rows.append(row)
+    return jsonify({'status': 'ok', 'count': len(rows), 'data': rows})
+
+
+@bp.route('/api/boiler-control/service-parameters', methods=['GET'])
+def get_service_parameters():
+    """Surowe parametry serwisowe (0x61/0xE1) - wymagany token serwisowy."""
+    if not _is_boiler_service_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Wymagany token serwisowy'}), 403
+    if not (_connection and getattr(_connection, 'connected', False)):
+        return jsonify({'status': 'error', 'message': 'Brak połączenia z modułem EW11A'}), 503
+    try:
+        params = _execute_blocking(_connection.request_service_parameters, timeout=3.0)
+    except TimeoutError as exc:
+        return jsonify({'status': 'error', 'message': str(exc)}), 504
+    rows = [
+        {'index': index, **entry}
+        for index, entry in sorted(params.items())
+        if entry.get('available')
+    ]
+    return jsonify({'status': 'ok', 'count': len(rows), 'data': rows})
+
+
+@bp.route('/api/boiler-control/power', methods=['POST'])
+def set_boiler_power():
+    """Wlacz lub wylacz kociol (regulator) - ramka 0x3B."""
+    if not request.is_json:
+        return jsonify({'status': 'error', 'message': 'Wymagany Content-Type: application/json'}), 415
+    if not _is_boiler_control_access_allowed():
+        return jsonify({'status': 'error', 'message': 'Brak uprawnień do sterowania kotłem'}), 403
+    if not (_connection and getattr(_connection, 'connected', False)):
+        return jsonify({'status': 'error', 'message': 'Brak połączenia z modułem EW11A'}), 503
+
+    payload = request.get_json(silent=True) or {}
+    # Scisla walidacja: niejednoznaczna wartosc nie moze wylaczyc kotla.
+    enabled_raw = payload.get('enabled')
+    strict_values = {True: True, False: False, 1: True, 0: False,
+                     '1': True, '0': False, 'true': True, 'false': False}
+    key = enabled_raw.strip().lower() if isinstance(enabled_raw, str) else enabled_raw
+    if not isinstance(key, (bool, int, str)) or key not in strict_values:
+        return jsonify({'status': 'error', 'message': 'Pole enabled musi mieć wartość true lub false'}), 400
+    enabled = strict_values[key]
+    request_id = str(payload.get('request_id') or uuid.uuid4())
+    last_data = _connection.last_data
+    old_mode = getattr(last_data, 'mode', None) if last_data else None
+    old_value = None if old_mode is None else ('0' if old_mode == 0 else '1')
+
+    log_common = dict(
+        request_id=request_id, source=_resolve_request_source(), target_type='ecomax',
+        target_index=0, param_key='BOILER_POWER', param_index=-1,
+        old_value=old_value, new_value='1' if enabled else '0',
+    )
+    try:
+        ack = _execute_blocking(_connection.set_boiler_power, enabled, timeout=3.0)
+    except TimeoutError as exc:
+        _log_boiler_change(status='timeout', message=str(exc), **log_common)
+        return jsonify({'status': 'error', 'message': str(exc)}), 504
+    except Exception as exc:
+        logging.getLogger(__name__).error('Blad wlaczania/wylaczania kotla: %s', exc, exc_info=True)
+        _log_boiler_change(status='error', message='Nie udało się zmienić stanu kotła', **log_common)
+        return jsonify({'status': 'error', 'message': 'Nie udało się zmienić stanu kotła'}), 500
+
+    message = 'Kocioł włączony' if enabled else 'Kocioł wyłączony'
+    _log_boiler_change(status='ok', message=message, **log_common)
+    return jsonify({'status': 'ok', 'message': message, 'data': {'enabled': enabled, 'ack': ack}})
 
 
 @bp.route('/api/boiler-control/service-access', methods=['GET'])
@@ -1581,6 +1784,7 @@ def set_boiler_control_parameter():
         )
         return jsonify({'status': 'error', 'message': 'Nie udało się zapisać parametru'}), 500
 
+    _invalidate_controller_caches(target_type)
     _log_boiler_change(
         request_id=request_id,
         source=source,
@@ -1681,6 +1885,7 @@ def set_boiler_control_batch():
                 timeout=2.0,
             )
 
+            _invalidate_controller_caches(resolved['target_type'])
             _log_boiler_change(
                 request_id=item_payload['request_id'],
                 source=source,

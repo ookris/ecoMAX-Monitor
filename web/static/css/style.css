@@ -1508,3 +1508,9 @@ input[type="checkbox"] {
 .parameters-table tr.is-ongoing td { color: var(--danger); font-weight: 600; }
 .pending-alarms { font-size: 0.8rem; font-weight: 600; margin-top: 2px; }
 .pending-alarms a { color: var(--danger); text-decoration: none; }
+
+/* Sterowanie: informacje o urządzeniu */
+.device-info-list { display: grid; grid-template-columns: max-content 1fr; gap: 4px 16px; margin: 0; }
+.device-info-list dt { color: var(--text-secondary); }
+.device-info-list dd { margin: 0; font-weight: 600; word-break: break-all; }
+#mixers-list h3 { font-size: 1rem; margin: 12px 0 8px; }

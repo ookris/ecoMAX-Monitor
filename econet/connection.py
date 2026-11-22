@@ -11,9 +11,34 @@ import logging
 import datetime
 import queue
 
+from functools import reduce
+
 from econet import alarms, protocol, decoder
+from econet.mixer_parameters import parse_mixer_parameters_payload
 
 logger = logging.getLogger(__name__)
+
+
+_UID_BASE32_KEY = "0123456789ABCDEFGHIJKLMNZPQRSTUV"
+
+
+def _crc16_uid(buffer: bytes) -> bytes:
+    def _byte(crc, value):
+        crc ^= value
+        for _ in range(8):
+            crc = (crc >> 1) ^ 0xA001 if crc & 1 else crc >> 1
+        return crc
+    return reduce(_byte, buffer, 0xA3A3).to_bytes(2, byteorder='little')
+
+
+def format_uid(uid_bytes: bytes) -> str:
+    """UID w formacie ecoNET (jak PyPlumIO unpack_uid: base32 z CRC16)."""
+    number = int.from_bytes(bytes(uid_bytes) + _crc16_uid(bytes(uid_bytes)), byteorder='little')
+    output = []
+    while number:
+        output.append(_UID_BASE32_KEY[number & 0x1F])
+        number >>= 5
+    return ''.join(reversed(output))
 
 
 def _format_bytes_hex(data, limit=256):
@@ -65,6 +90,9 @@ class EW11AConnection:
             protocol.FRAME_SCHEDULES_ANS: queue.Queue(maxsize=20),
             protocol.FRAME_UID_ANS: queue.Queue(maxsize=5),
             protocol.FRAME_ALARMS_ANS: queue.Queue(maxsize=20),
+            protocol.FRAME_GET_MIXER_PARAMS_ANS: queue.Queue(maxsize=5),
+            protocol.FRAME_GET_SERVICE_PARAMS_ANS: queue.Queue(maxsize=5),
+            protocol.FRAME_SET_BOILER_CONTROL_ANS: queue.Queue(maxsize=5),
         }
         self._device_info: dict | None = None
 
@@ -491,10 +519,11 @@ class EW11AConnection:
         idx += 1
 
         uid_str = ''
+        uid_hex = ''
         if uid_len > 0 and idx + uid_len <= len(payload):
             uid_bytes = payload[idx:idx + uid_len]
-            # UID jest kodowany w base5 w PyPlumIO - tutaj zwracamy hex
-            uid_str = uid_bytes.hex()
+            uid_hex = uid_bytes.hex()
+            uid_str = format_uid(uid_bytes)
             idx += uid_len
 
         # logo(2) + image(2)
@@ -513,6 +542,7 @@ class EW11AConnection:
             'product_type': product_type,
             'product_id': product_id,
             'uid': uid_str,
+            'uid_hex': uid_hex,
             'model': model,
         }
 
@@ -534,6 +564,67 @@ class EW11AConnection:
         if info.get('model'):  # nie cachuj niepełnych wyników
             self._device_info = info
         return info
+
+    def _request_response(self, frame_bytes, response_type, timeout, error_message):
+        """Wyslij zapytanie i zwroc odpowiedz danego typu od sterownika ecoMAX.
+
+        Pomija ramki tego typu adresowane do innych urzadzen (np. odpowiedzi dla panelu),
+        przyjmuje odpowiedzi rozgloszeniowe (0x00) i adresowane do ecoNET (0x56).
+        """
+        with self._transaction_lock:
+            self._drain_response_queue(response_type)
+            self.send_frame(frame_bytes)
+            response_queue = self._response_queues[response_type]
+            deadline = time.time() + max(0.1, float(timeout))
+            while True:
+                remaining = deadline - time.time()
+                if remaining <= 0:
+                    raise TimeoutError(error_message)
+                try:
+                    frame = response_queue.get(timeout=remaining)
+                except queue.Empty as exc:
+                    raise TimeoutError(error_message) from exc
+                if (frame.get('source') == protocol.ADDR_ECOMAX
+                        and frame.get('dest') in (protocol.ADDR_BROADCAST, protocol.ADDR_ECONET)):
+                    return frame
+
+    def request_mixer_parameters(self, timeout=3.0) -> dict:
+        """Parametry wszystkich mieszaczy (0x32 -> 0xB2): {mieszacz: {indeks: {...}}}."""
+        frame = self._request_response(
+            protocol.FrameBuilder.request_mixer_parameters(dest_addr=protocol.ADDR_ECOMAX),
+            protocol.FRAME_GET_MIXER_PARAMS_ANS,
+            timeout,
+            'Brak odpowiedzi na zapytanie parametrów mieszaczy (0xB2)',
+        )
+        return parse_mixer_parameters_payload(bytes(frame.get('payload') or b''))
+
+    def request_service_parameters(self, timeout=3.0) -> dict:
+        """Parametry serwisowe (0x61 -> 0xE1): {indeks: {available, value, min_value, max_value}}."""
+        frame = self._request_response(
+            protocol.FrameBuilder.request_service_parameters(dest_addr=protocol.ADDR_ECOMAX),
+            protocol.FRAME_GET_SERVICE_PARAMS_ANS,
+            timeout,
+            'Brak odpowiedzi na zapytanie parametrów serwisowych (0xE1)',
+        )
+        payload = bytes(frame.get('payload') or b'')
+        if len(payload) < 2:
+            return {}
+        # Format jak 0xB1, ale bez bajtu poprzedzajacego: [count][start] + 3 B na parametr.
+        return self._parse_ecomax_parameters_payload(b'\x00' + payload[1:2] + payload[0:1] + payload[2:])
+
+    def set_boiler_power(self, enabled: bool, timeout=3.0) -> dict:
+        """Wlacz/wylacz regulator kotla (0x3B -> 0xBB)."""
+        frame = self._request_response(
+            protocol.FrameBuilder.set_boiler_control(dest_addr=protocol.ADDR_ECOMAX, value=1 if enabled else 0),
+            protocol.FRAME_SET_BOILER_CONTROL_ANS,
+            timeout,
+            'Brak potwierdzenia włączenia/wyłączenia kotła (0xBB)',
+        )
+        return {
+            'ack_type': frame.get('type'),
+            'ack_source': frame.get('source'),
+            'payload_hex': bytes(frame.get('payload') or b'').hex(),
+        }
 
     def request_alerts(self, start=0, count=alarms.ALERTS_PAGE_SIZE, timeout=3.0) -> dict:
         """Pobierz strone historii alarmow (0x3D -> 0xBD).

@@ -58,7 +58,8 @@ Sterownik: ecoMAX920P1-EN, moduł A 5.11.23.E1, panel 5.11.15 (adres 0x50), 1 z 
    walidacja zapisu parametrów mieszacza względem zakresów sterownika (dziś 0–255).
 2. Parametry rozpalania/stabilizacji/nadzoru/wygaszania/podawania (idx 0–89) — panel tylko do odczytu z polskimi nazwami.
 3. Parametry serwisowe (0x61 → 0xE1) — surowa tabela dostępna tylko z tokenem serwisowym (brak nazw w źródłach).
-4. UID w formacie ecoNET (base32 + CRC jak w PyPlumIO) oraz wersje/daty firmware (0x40 → 0xC0).
+4. UID w formacie ecoNET (base32 + CRC jak w PyPlumIO). ~~Wersje/daty firmware (0x40 → 0xC0)~~ — pominięte: odpowiedź
+   sterownika trafiła do innego adresata (0x55), a jej format nie jest opisany; wersje modułów są już w ramce 0x35.
 5. Włączanie/wyłączanie kotła (0x3B → 0xBB): endpoint z uprawnieniami sterowania, potwierdzenie w UI, wpis do historii zmian.
 
 ## Faza 5 — Dane regulatora (ramka 0x08, regdata)
@@ -67,7 +68,7 @@ Sterownik: ecoMAX920P1-EN, moduł A 5.11.23.E1, panel 5.11.15 (adres 0x50), 1 z 
 2. Ogólny dekoder wszystkich typów (bit array, liczby, float, IPv4, string).
 3. Mapa znanych pól (temperatury, zadane, wentylator %, podajnik, pozycja zaworu mieszacza, surowe ADC czujników, informacje sieciowe).
 4. Strona Parametry: sekcja „Dane regulatora” (id, typ, wartość, nazwa) z możliwością nadania własnej nazwy polu.
-5. Pozycja zaworu mieszacza trafia do danych mieszacza (po weryfikacji źródła).
+5. ~~Pozycja zaworu mieszacza~~ — zrealizowane w fazie 2 (bajt 7 mieszacza w 0x35, zweryfikowany z polem 140 regdata).
 
 ## Faza 6 — Analityka
 

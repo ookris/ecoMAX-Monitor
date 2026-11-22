@@ -12,6 +12,20 @@
     <section class="settings-section">
         <div class="panel-head">
             <div>
+                <h2>Kocioł i urządzenie</h2>
+                <p class="settings-hint">Model i wersje modułów sterownika oraz włączanie/wyłączanie kotła (jak przyciskiem na panelu).</p>
+            </div>
+            <div class="section-actions">
+                <button type="button" class="btn-secondary" onclick="setBoilerPower(true)"><iconify-icon icon="mdi:power"></iconify-icon> Włącz kocioł</button>
+                <button type="button" class="btn-secondary btn-danger" onclick="setBoilerPower(false)"><iconify-icon icon="mdi:power-off"></iconify-icon> Wyłącz kocioł</button>
+            </div>
+        </div>
+        <dl id="device-info" class="device-info-list"><dt>Stan</dt><dd>Ładowanie…</dd></dl>
+    </section>
+
+    <section class="settings-section">
+        <div class="panel-head">
+            <div>
                 <h2>Nastawy kotła</h2>
                 <p class="settings-hint">Zmiany są zapisywane w sterowniku pojedynczo, z kontrolą dozwolonego zakresu.</p>
             </div>
@@ -28,6 +42,58 @@
             <button type="button" class="btn-secondary" id="btn-service-clear" style="display:none;">Usuń token serwisowy</button>
         </div>
         <div id="boiler-control-list" class="settings-grid control-grid"></div>
+    </section>
+
+    <section class="settings-section" data-min-profile="installer">
+        <div class="panel-head">
+            <div>
+                <h2>Mieszacze</h2>
+                <p class="settings-hint">Parametry obiegów mieszaczy odczytane ze sterownika. Zapis z kontrolą zakresu podanego przez sterownik.</p>
+            </div>
+            <button type="button" class="btn-secondary" onclick="loadMixers(true)"><iconify-icon icon="mdi:refresh"></iconify-icon> Odśwież</button>
+        </div>
+        <div id="mixers-list"><p class="settings-hint">Ładowanie…</p></div>
+    </section>
+
+    <section class="settings-section" data-min-profile="installer">
+        <div class="panel-head">
+            <div>
+                <h2>Parametry pracy sterownika (odczyt)</h2>
+                <p class="settings-hint">Wszystkie parametry udostępniane przez sterownik: rozpalanie, nadzór, wygaszanie, podawanie paliwa, obiegi. Tylko podgląd – zmiany wybranych nastaw w sekcji „Nastawy kotła”.</p>
+            </div>
+            <label class="field-inline">
+                <span>Grupa</span>
+                <select id="controller-params-group" class="alerts-filter-select"><option value="all">Wszystkie</option></select>
+            </label>
+        </div>
+        <div class="parameters-table-wrap">
+            <table class="parameters-table">
+                <thead>
+                    <tr><th>Grupa</th><th>#</th><th>Parametr</th><th>Wartość</th><th>Zakres</th></tr>
+                </thead>
+                <tbody id="controller-params-body">
+                    <tr><td colspan="5" class="parameters-empty">Ładowanie…</td></tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
+
+    <section class="settings-section" data-min-profile="service">
+        <div class="panel-head">
+            <div>
+                <h2>Parametry serwisowe (surowe)</h2>
+                <p class="settings-hint">Odczyt ramki 0x61/0xE1. Brak opisów w dostępnych źródłach – wartości surowe z zakresem.</p>
+            </div>
+            <button type="button" class="btn-secondary" onclick="loadServiceParameters()">Odczytaj</button>
+        </div>
+        <div class="parameters-table-wrap">
+            <table class="parameters-table">
+                <thead><tr><th>#</th><th>Wartość</th><th>Min</th><th>Max</th></tr></thead>
+                <tbody id="service-params-body">
+                    <tr><td colspan="4" class="parameters-empty">Kliknij „Odczytaj”.</td></tr>
+                </tbody>
+            </table>
+        </div>
     </section>
 
     <section class="settings-section" data-min-profile="service">

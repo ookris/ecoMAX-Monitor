@@ -39,6 +39,7 @@ FRAME_GET_ALARMS = 0x3D
 FRAME_GET_SCHEDULES = 0x36
 FRAME_SET_SCHEDULE = 0x37
 FRAME_GET_THERMOSTAT_PARAMS = 0x5C
+FRAME_GET_SERVICE_PARAMS = 0x61
 FRAME_SET_THERMOSTAT_PARAM = 0x5D
 
 # Typy ramek - odpowiedzi
@@ -54,6 +55,7 @@ FRAME_SCHEDULES_ANS = 0xB6
 FRAME_ALARMS_ANS = 0xBD
 FRAME_SET_THERMOSTAT_PARAM_ANS = 0xDD
 FRAME_GET_THERMOSTAT_PARAMS_ANS = 0xDC
+FRAME_GET_SERVICE_PARAMS_ANS = 0xE1
 FRAME_TIME = 0x89
 
 # Minimalne/maksymalne dlugosci
@@ -244,6 +246,24 @@ class FrameBuilder:
             byteorder='little',
             signed=False,
         )
+        return FrameBuilder.create_frame(dest_addr, body)
+
+    @staticmethod
+    def request_mixer_parameters(dest_addr=ADDR_ECOMAX, start=0, count=255):
+        """Ramka 0x32 - pobierz parametry mieszaczy."""
+        body = bytes([FRAME_GET_MIXER_PARAMS, count & 0xFF, start & 0xFF])
+        return FrameBuilder.create_frame(dest_addr, body)
+
+    @staticmethod
+    def request_service_parameters(dest_addr=ADDR_ECOMAX, start=0, count=255):
+        """Ramka 0x61 - pobierz parametry serwisowe."""
+        body = bytes([FRAME_GET_SERVICE_PARAMS, count & 0xFF, start & 0xFF])
+        return FrameBuilder.create_frame(dest_addr, body)
+
+    @staticmethod
+    def set_boiler_control(dest_addr=ADDR_ECOMAX, value=0):
+        """Ramka 0x3B - wlacz (1) / wylacz (0) regulator kotla."""
+        body = bytes([FRAME_SET_BOILER_CONTROL, 1 if value else 0])
         return FrameBuilder.create_frame(dest_addr, body)
 
     @staticmethod
