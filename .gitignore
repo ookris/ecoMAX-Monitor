@@ -6,3 +6,5 @@
 /data/*.db
 /data/logs/
 /tests/__pycache__
+/EW11A manual
+/docs/instrukcje

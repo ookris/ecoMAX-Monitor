@@ -419,6 +419,8 @@ ecoMAX-Monitor/
 │   ├── templates/             # Strony aplikacji
 │   └── static/                # CSS, JS, obrazy
 ├── tests/                     # Testy automatyczne (pytest)
+├── tools/                     # Narzędzia diagnostyczne
+│   └── measure_bus.py         # Pomiar ruchu z magistrali RS485 przez EW11A
 ├── docs/                      # Plan i raport wdrożenia funkcji
 └── data/                      # Baza danych i logi (tworzone automatycznie)
 ```
